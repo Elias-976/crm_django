@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.contrib.postgres',
     'core',
 ]
 
@@ -187,6 +188,11 @@ UNFOLD = {
                         "icon": "forum",
                         "link": reverse_lazy("admin:core_interaction_changelist"),
                     },
+                    {
+                        "title": "Règles d'Automatisation",
+                        "icon": "bolt",
+                        "link": reverse_lazy("admin:core_workflowrule_changelist"),
+                    },
                 ],
             },
             {
@@ -198,6 +204,11 @@ UNFOLD = {
                         "title": "Organisations",
                         "icon": "apartment",
                         "link": reverse_lazy("admin:core_organization_changelist"),
+                    },
+                    {
+                        "title": "Membres d'Organisation",
+                        "icon": "group_add",
+                        "link": reverse_lazy("admin:core_organizationmembership_changelist"),
                     },
                     {
                         "title": "Profils Utilisateurs",

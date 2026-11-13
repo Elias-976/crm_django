@@ -21,13 +21,20 @@ from .models import (
     LeadStatus,
     LossReason,
     Organization,
+    OrganizationMembership,
+    OrganizationRole,
     Task,
+    TaskPriority,
+    TaskStatus,
     UserProfile,
+    WorkflowAction,
+    WorkflowRule,
+    WorkflowTrigger,
 )
 
 
 # ------------------------------------------------------------------------------
-# 1. Filtres Métiers Avancés (Scoring & Relance)
+# 1. Filtres Métiers Avancés (Scoring, Relance & Tâches)
 # ------------------------------------------------------------------------------
 
 class HotLeadFilter(admin.SimpleListFilter):
@@ -74,6 +81,78 @@ class FollowUpFilter(admin.SimpleListFilter):
         return queryset
 
 
+class TaskDueFilter(admin.SimpleListFilter):
+    title = "Échéance du Rappel"
+    parameter_name = "due_status"
+
+    def lookups(self, request, model_admin):
+        return [
+            ("overdue", "🚨 En retard"),
+            ("today", "⭐ À traiter aujourd'hui"),
+            ("week", "📅 Cette semaine"),
+            ("upcoming", "⏳ À venir"),
+            ("completed", "✅ Terminées"),
+        ]
+
+    def queryset(self, request, queryset):
+        now = timezone.now()
+        today = now.date()
+        if self.value() == "overdue":
+            return queryset.filter(status=TaskStatus.PENDING, due_date__lt=now)
+        if self.value() == "today":
+            return queryset.filter(status=TaskStatus.PENDING, due_date__date=today)
+        if self.value() == "week":
+            end_of_week = today + timedelta(days=7)
+            return queryset.filter(status=TaskStatus.PENDING, due_date__date__range=[today, end_of_week])
+        if self.value() == "upcoming":
+            return queryset.filter(status=TaskStatus.PENDING, due_date__gt=now)
+        if self.value() == "completed":
+            return queryset.filter(status=TaskStatus.COMPLETED)
+        return queryset
+
+
+class TrashFilter(admin.SimpleListFilter):
+    title = "État d'archivage (Corbeille)"
+    parameter_name = "is_deleted"
+
+    def lookups(self, request, model_admin):
+        return [
+            ("alive", "🟢 Actifs"),
+            ("trash", "🗑️ Corbeille (Supprimés)"),
+        ]
+
+    def queryset(self, request, queryset):
+        if self.value() == "alive":
+            return queryset.filter(deleted_at__isnull=True)
+        if self.value() == "trash":
+            return queryset.filter(deleted_at__isnull=False)
+        return queryset
+
+
+class SoftDeleteAdminMixin:
+    """Mixin apportant les actions de corbeille et de restauration rapide."""
+
+    actions = ["soft_delete_selected_action", "restore_selected_action"]
+
+    @action(description="Mettre à la corbeille 🗑️", icon="delete")
+    def soft_delete_selected_action(self, request, queryset):
+        count = 0
+        for obj in queryset:
+            if hasattr(obj, "soft_delete"):
+                obj.soft_delete()
+                count += 1
+        messages.success(request, f"{count} élément(s) déplacé(s) dans la corbeille.")
+
+    @action(description="Restaurer depuis la corbeille ♻️", icon="restore_from_trash")
+    def restore_selected_action(self, request, queryset):
+        count = 0
+        for obj in queryset:
+            if hasattr(obj, "restore"):
+                obj.restore()
+                count += 1
+        messages.success(request, f"{count} élément(s) restauré(s) avec succès.")
+
+
 # ------------------------------------------------------------------------------
 # 2. Inlines Unfold
 # ------------------------------------------------------------------------------
@@ -94,15 +173,16 @@ class TaskInline(TabularInline):
 
 
 # ------------------------------------------------------------------------------
-# 3. Administration des Tenants
+# 3. Administration des Tenants & Espaces de Travail
 # ------------------------------------------------------------------------------
 
 @admin.register(Organization)
-class OrganizationAdmin(ModelAdmin):
+class OrganizationAdmin(SoftDeleteAdminMixin, ModelAdmin):
     list_display = ("name", "slug", "is_active", "created_at")
     search_fields = ("name", "slug")
-    list_filter = ("is_active", "created_at")
+    list_filter = ("is_active", TrashFilter, "created_at")
     prepopulated_fields = {"slug": ("name",)}
+    readonly_fields = ("uuid", "created_at", "updated_at", "deleted_at")
 
 
 @admin.register(UserProfile)
@@ -115,21 +195,35 @@ class UserProfileAdmin(ModelAdmin):
     search_fields = ("user__username", "user__email", "organization__name")
 
 
+@admin.register(OrganizationMembership)
+class OrganizationMembershipAdmin(SoftDeleteAdminMixin, ModelAdmin):
+    list_display = ("user", "organization", "role", "is_default", "created_at")
+    list_filter = (
+        ("organization", RelatedDropdownFilter),
+        "role",
+        "is_default",
+        TrashFilter,
+    )
+    search_fields = ("user__username", "user__email", "organization__name")
+    readonly_fields = ("uuid", "created_at", "updated_at", "deleted_at")
+
+
 # ------------------------------------------------------------------------------
 # 4. Entreprises & Comptes
 # ------------------------------------------------------------------------------
 
 @admin.register(Company)
-class CompanyAdmin(ModelAdmin):
+class CompanyAdmin(SoftDeleteAdminMixin, ModelAdmin):
     list_display = ("name", "organization", "domain", "phone", "city", "owner", "last_activity_at", "created_at")
     list_filter = (
         ("organization", RelatedDropdownFilter),
         "industry",
         ("owner", RelatedDropdownFilter),
+        TrashFilter,
         "created_at",
     )
     search_fields = ("name", "domain", "city", "phone")
-    readonly_fields = ("created_at", "updated_at", "last_activity_at")
+    readonly_fields = ("uuid", "created_at", "updated_at", "last_activity_at", "deleted_at")
     inlines = [InteractionInline, TaskInline]
 
     def get_queryset(self, request):
@@ -141,7 +235,7 @@ class CompanyAdmin(ModelAdmin):
 # ------------------------------------------------------------------------------
 
 @admin.register(Contact)
-class ContactAdmin(ModelAdmin):
+class ContactAdmin(SoftDeleteAdminMixin, ModelAdmin):
     list_display = (
         "full_name",
         "display_lead_score",
@@ -160,9 +254,10 @@ class ContactAdmin(ModelAdmin):
         ("lead_status", ChoicesDropdownFilter),
         ("owner", RelatedDropdownFilter),
         ("company", RelatedDropdownFilter),
+        TrashFilter,
     )
     search_fields = ("first_name", "last_name", "email", "phone", "company__name")
-    readonly_fields = ("created_at", "updated_at", "last_activity_at")
+    readonly_fields = ("uuid", "created_at", "updated_at", "last_activity_at", "deleted_at")
     inlines = [InteractionInline, TaskInline]
     actions_row = ["qualify_lead_action", "recalculate_score_action"]
 
@@ -178,7 +273,7 @@ class ContactAdmin(ModelAdmin):
         }),
         ("Champs Spécifiques / Métadonnées", {
             "classes": ("collapse",),
-            "fields": ("custom_fields", "created_at", "updated_at")
+            "fields": ("uuid", "custom_fields", "created_at", "updated_at", "deleted_at")
         }),
     )
 
@@ -261,7 +356,7 @@ class ContactAdmin(ModelAdmin):
 # ------------------------------------------------------------------------------
 
 @admin.register(Deal)
-class DealAdmin(ModelAdmin):
+class DealAdmin(SoftDeleteAdminMixin, ModelAdmin):
     list_display = (
         "title",
         "display_amount",
@@ -280,9 +375,10 @@ class DealAdmin(ModelAdmin):
         ("loss_reason", ChoicesDropdownFilter),
         ("owner", RelatedDropdownFilter),
         "expected_close_date",
+        TrashFilter,
     )
     search_fields = ("title", "contact__last_name", "company__name")
-    readonly_fields = ("created_at", "updated_at", "closed_at", "last_activity_at")
+    readonly_fields = ("uuid", "created_at", "updated_at", "closed_at", "last_activity_at", "deleted_at")
     inlines = [InteractionInline, TaskInline]
 
     actions_list = ["kanban_view_action"]
@@ -301,7 +397,7 @@ class DealAdmin(ModelAdmin):
         }),
         ("Suivi & Métadonnées", {
             "classes": ("collapse",),
-            "fields": ("last_activity_at", "custom_fields", "created_at", "updated_at")
+            "fields": ("uuid", "last_activity_at", "custom_fields", "created_at", "updated_at", "deleted_at")
         }),
     )
 
@@ -465,11 +561,11 @@ class DealAdmin(ModelAdmin):
 
 
 # ------------------------------------------------------------------------------
-# 7. Timeline des Interactions & Tâches
+# 7. Timeline des Interactions
 # ------------------------------------------------------------------------------
 
 @admin.register(Interaction)
-class InteractionAdmin(ModelAdmin):
+class InteractionAdmin(SoftDeleteAdminMixin, ModelAdmin):
     list_display = ("title", "organization", "type", "direction", "contact", "company", "deal", "user", "occurred_at")
     list_filter = (
         ("organization", RelatedDropdownFilter),
@@ -477,36 +573,195 @@ class InteractionAdmin(ModelAdmin):
         ("direction", ChoicesDropdownFilter),
         ("user", RelatedDropdownFilter),
         "occurred_at",
+        TrashFilter,
     )
     search_fields = ("title", "content", "contact__last_name", "company__name")
-    readonly_fields = ("created_at", "updated_at")
+    readonly_fields = ("uuid", "created_at", "updated_at", "deleted_at")
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related("organization", "contact", "company", "deal", "user")
 
 
+# ------------------------------------------------------------------------------
+# 8. Module de Tâches & Relances (Productivité)
+# ------------------------------------------------------------------------------
+
 @admin.register(Task)
-class TaskAdmin(ModelAdmin):
+class TaskAdmin(SoftDeleteAdminMixin, ModelAdmin):
     list_display = (
         "title",
-        "organization",
-        "due_date",
-        "priority",
-        "status",
+        "display_due_status",
+        "display_priority",
+        "display_status",
         "assigned_to",
         "contact",
-        "company",
         "deal",
+        "company",
+        "organization",
     )
     list_filter = (
+        TaskDueFilter,
         ("organization", RelatedDropdownFilter),
         ("status", ChoicesDropdownFilter),
         ("priority", ChoicesDropdownFilter),
         ("assigned_to", RelatedDropdownFilter),
         "due_date",
+        TrashFilter,
     )
     search_fields = ("title", "description", "contact__last_name", "company__name")
-    readonly_fields = ("created_at", "updated_at", "completed_at")
+    readonly_fields = ("uuid", "created_at", "updated_at", "completed_at", "deleted_at")
+    actions_row = ["complete_task_action", "postpone_one_day_action", "postpone_three_days_action"]
+
+    fieldsets = (
+        ("Détails du Rappel & Priorité", {
+            "fields": ("organization", "title", "description", "due_date", "priority", "status", "assigned_to")
+        }),
+        ("Rattachement Relationnel", {
+            "fields": ("contact", "company", "deal")
+        }),
+        ("Horodatage & Réalisation", {
+            "classes": ("collapse",),
+            "fields": ("uuid", "completed_at", "created_at", "updated_at", "deleted_at")
+        }),
+    )
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related("organization", "contact", "company", "deal", "assigned_to")
+
+    @display(description="Échéance & Retard", ordering="due_date")
+    def display_due_status(self, obj):
+        now = timezone.now()
+        if obj.status == TaskStatus.COMPLETED:
+            return f"✅ Fait ({obj.completed_at:%d/%m})" if obj.completed_at else "✅ Fait"
+        if obj.due_date < now:
+            days = (now - obj.due_date).days
+            return f"🚨 Retard ({days}j)"
+        if obj.due_date.date() == now.date():
+            return "⭐ Aujourd'hui"
+        days = (obj.due_date.date() - now.date()).days
+        return f"⏳ Dans {days}j ({obj.due_date:%d/%m})"
+
+    @display(
+        description="Priorité",
+        ordering="priority",
+        label={
+            TaskPriority.URGENT: "danger",
+            TaskPriority.HIGH: "warning",
+            TaskPriority.MEDIUM: "primary",
+            TaskPriority.LOW: "info",
+        },
+    )
+    def display_priority(self, obj):
+        return obj.priority, obj.get_priority_display()
+
+    @display(
+        description="Statut",
+        ordering="status",
+        label={
+            TaskStatus.PENDING: "warning",
+            TaskStatus.COMPLETED: "success",
+            TaskStatus.CANCELLED: "info",
+        },
+    )
+    def display_status(self, obj):
+        return obj.status, obj.get_status_display()
+
+    @action(description="Terminer ✅", icon="check_circle")
+    def complete_task_action(self, request, object_id):
+        task = self.get_object(request, object_id)
+        if task:
+            task.mark_completed(log_interaction=True)
+            messages.success(request, f"Tâche '{task.title}' marquée comme terminée ✅ et consignée dans l'historique.")
+        return redirect("admin:core_task_changelist")
+
+    @action(description="+1 jour 📅", icon="event")
+    def postpone_one_day_action(self, request, object_id):
+        task = self.get_object(request, object_id)
+        if task:
+            task.due_date += timedelta(days=1)
+            task.save(update_fields=["due_date", "updated_at"])
+            messages.success(request, f"Tâche '{task.title}' reportée au {task.due_date:%d/%m/%Y}.")
+        return redirect("admin:core_task_changelist")
+
+    @action(description="+3 jours 📅", icon="update")
+    def postpone_three_days_action(self, request, object_id):
+        task = self.get_object(request, object_id)
+        if task:
+            task.due_date += timedelta(days=3)
+            task.save(update_fields=["due_date", "updated_at"])
+            messages.success(request, f"Tâche '{task.title}' reportée au {task.due_date:%d/%m/%Y}.")
+        return redirect("admin:core_task_changelist")
+
+
+# ------------------------------------------------------------------------------
+# 9. Règles d'Automatisation (Workflows)
+# ------------------------------------------------------------------------------
+
+@admin.register(WorkflowRule)
+class WorkflowRuleAdmin(SoftDeleteAdminMixin, ModelAdmin):
+    list_display = (
+        "name",
+        "organization",
+        "display_trigger",
+        "display_action",
+        "is_active",
+        "created_at",
+    )
+    list_filter = (
+        ("organization", RelatedDropdownFilter),
+        ("trigger_event", ChoicesDropdownFilter),
+        ("action_type", ChoicesDropdownFilter),
+        "is_active",
+        TrashFilter,
+    )
+    search_fields = ("name", "task_title", "email_subject")
+    readonly_fields = ("uuid", "created_at", "updated_at", "deleted_at")
+    actions_row = ["toggle_active_action"]
+
+    fieldsets = (
+        ("Configuration de la règle", {
+            "fields": ("organization", "name", "is_active")
+        }),
+        ("Déclencheur d'Événement", {
+            "description": "L'action sera exécutée automatiquement dès que cet événement se produit.",
+            "fields": ("trigger_event", "trigger_stage")
+        }),
+        ("Action Automatique", {
+            "fields": ("action_type",)
+        }),
+        ("Paramètres de la Tâche de Relance (si applicable)", {
+            "description": "Variables de remplacement disponibles : {deal_title}, {contact_name}, {company_name}, {deal_amount}",
+            "fields": ("task_title", "task_delay_days", "task_priority")
+        }),
+        ("Paramètres de l'E-mail Modèle (si applicable)", {
+            "description": "L'e-mail envoyé est automatiquement consigné dans la timeline des interactions du contact.",
+            "fields": ("email_subject", "email_body")
+        }),
+    )
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related("organization")
+
+    @display(description="Déclencheur", ordering="trigger_event")
+    def display_trigger(self, obj):
+        if obj.trigger_event == WorkflowTrigger.DEAL_STAGE_ENTERED and obj.trigger_stage:
+            return f"⚡ Étape Deal : {obj.get_trigger_stage_display()}"
+        return f"⚡ {obj.get_trigger_event_display()}"
+
+    @display(description="Action Exécutée", ordering="action_type")
+    def display_action(self, obj):
+        if obj.action_type == WorkflowAction.CREATE_TASK:
+            return f"📋 Tâche à J+{obj.task_delay_days}"
+        elif obj.action_type == WorkflowAction.SEND_EMAIL:
+            return "✉️ Envoi d'e-mail modèle"
+        return f"📋 Tâche (J+{obj.task_delay_days}) + ✉️ E-mail"
+
+    @action(description="Activer / Désactiver", icon="toggle_on")
+    def toggle_active_action(self, request, object_id):
+        rule = self.get_object(request, object_id)
+        if rule:
+            rule.is_active = not rule.is_active
+            rule.save(update_fields=["is_active", "updated_at"])
+            state = "activée" if rule.is_active else "désactivée"
+            messages.success(request, f"La règle '{rule.name}' a été {state}.")
+        return redirect("admin:core_workflowrule_changelist")

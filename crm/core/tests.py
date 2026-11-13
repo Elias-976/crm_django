@@ -17,10 +17,15 @@ from .models import (
     LeadStatus,
     LossReason,
     Organization,
+    OrganizationMembership,
+    OrganizationRole,
     Task,
     TaskPriority,
     TaskStatus,
     UserProfile,
+    WorkflowAction,
+    WorkflowRule,
+    WorkflowTrigger,
 )
 
 User = get_user_model()
@@ -493,3 +498,305 @@ class CoreModelTestCase(TestCase):
         cold_tag, cold_text = contact_admin.display_lead_score(cold_contact)
         self.assertEqual(cold_tag, "COLD")
         self.assertIn("❄️ 0 (Froid)", cold_text)
+
+    def test_workflow_rule_validation(self):
+        # 1. Règle sur étape sans préciser l'étape cible -> échec
+        invalid_rule = WorkflowRule(
+            organization=self.organization,
+            name="Règle Invalide",
+            trigger_event=WorkflowTrigger.DEAL_STAGE_ENTERED,
+            trigger_stage="",
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            invalid_rule.save()
+        self.assertIn("trigger_stage", ctx.exception.message_dict)
+
+        # 2. Règle valide
+        valid_rule = WorkflowRule(
+            organization=self.organization,
+            name="Relance Devis J+3",
+            trigger_event=WorkflowTrigger.DEAL_STAGE_ENTERED,
+            trigger_stage=DealStage.PROPOSAL,
+            action_type=WorkflowAction.CREATE_TASK,
+            task_delay_days=3,
+        )
+        valid_rule.save()
+        self.assertEqual(valid_rule.task_title, "Relance : {deal_title}")
+
+    def test_deal_stage_proposal_workflow_creates_follow_up_task(self):
+        # Configuration de la règle : si passage à PROPOSAL -> Tâche de relance à J+3
+        WorkflowRule.objects.create(
+            organization=self.organization,
+            name="Relance devis envoyé",
+            trigger_event=WorkflowTrigger.DEAL_STAGE_ENTERED,
+            trigger_stage=DealStage.PROPOSAL,
+            action_type=WorkflowAction.CREATE_TASK,
+            task_title="Rappeler {contact_name} pour le devis {deal_title}",
+            task_delay_days=3,
+            task_priority=TaskPriority.HIGH,
+        )
+
+        deal = Deal.objects.create(
+            organization=self.organization,
+            title="Prestation Audit Cybersécurité",
+            amount=Decimal("18000.00"),
+            stage=DealStage.QUALIFIED,
+            contact=self.contact,
+            company=self.company,
+            owner=self.user,
+        )
+
+        # Passage à l'étape PROPOSAL (Devis envoyé)
+        deal.stage = DealStage.PROPOSAL
+        deal.save()
+
+        # Vérification qu'une tâche de relance à J+3 a été créée automatiquement
+        tasks = Task.objects.filter(deal=deal)
+        self.assertEqual(tasks.count(), 1)
+        task = tasks.first()
+
+        self.assertEqual(
+            task.title,
+            f"Rappeler {self.contact.full_name} pour le devis {deal.title}",
+        )
+        self.assertEqual(task.priority, TaskPriority.HIGH)
+        self.assertEqual(task.assigned_to, self.user)
+        self.assertEqual(task.organization, self.organization)
+
+        # Vérifier l'échéance à J+3 (+- 10 secondes)
+        expected_due = timezone.now() + timedelta(days=3)
+        self.assertEqual(task.due_date.date(), expected_due.date())
+
+    def test_deal_workflow_sends_email_and_logs_interaction(self):
+        from django.core import mail
+
+        # Configuration de la règle : Créer une tâche ET envoyer un e-mail automatique
+        WorkflowRule.objects.create(
+            organization=self.organization,
+            name="Accusé devis + Tâche",
+            trigger_event=WorkflowTrigger.DEAL_STAGE_ENTERED,
+            trigger_stage=DealStage.PROPOSAL,
+            action_type=WorkflowAction.CREATE_TASK_AND_EMAIL,
+            task_title="Suivi proposition {deal_title}",
+            task_delay_days=4,
+            email_subject="Votre proposition commerciale : {deal_title}",
+            email_body="Bonjour {contact_name},\nVoici les éléments pour {deal_title}.",
+        )
+
+        deal = Deal.objects.create(
+            organization=self.organization,
+            title="Refonte Infrastructure",
+            amount=Decimal("25000.00"),
+            stage=DealStage.QUALIFIED,
+            contact=self.contact,
+            company=self.company,
+            owner=self.user,
+        )
+
+        # Déclenchement de la transition
+        deal.stage = DealStage.PROPOSAL
+        deal.save()
+
+        # 1. Vérification de l'e-mail envoyé
+        self.assertEqual(len(mail.outbox), 1)
+        sent_email = mail.outbox[0]
+        self.assertEqual(sent_email.to, [self.contact.email])
+        self.assertIn("Refonte Infrastructure", sent_email.subject)
+        self.assertIn(self.contact.full_name, sent_email.body)
+
+        # 2. Vérification de l'interaction tracée dans la timeline
+        interactions = Interaction.objects.filter(deal=deal, type=InteractionType.EMAIL)
+        self.assertEqual(interactions.count(), 1)
+        interaction = interactions.first()
+        self.assertEqual(interaction.direction, InteractionDirection.OUTBOUND)
+        self.assertIn("E-mail automatique", interaction.title)
+
+    def test_inactive_workflow_does_not_trigger(self):
+        WorkflowRule.objects.create(
+            organization=self.organization,
+            name="Règle désactivée",
+            trigger_event=WorkflowTrigger.DEAL_STAGE_ENTERED,
+            trigger_stage=DealStage.PROPOSAL,
+            action_type=WorkflowAction.CREATE_TASK,
+            task_title="Ne doit pas être créée",
+            is_active=False,
+        )
+
+        deal = Deal.objects.create(
+            organization=self.organization,
+            title="Deal Sans Automatisation",
+            stage=DealStage.QUALIFIED,
+            contact=self.contact,
+            company=self.company,
+        )
+        deal.stage = DealStage.PROPOSAL
+        deal.save()
+
+        self.assertFalse(Task.objects.filter(deal=deal).exists())
+
+    def test_task_admin_displays_and_quick_actions(self):
+        from .admin import TaskAdmin
+        from django.contrib.admin.sites import AdminSite
+
+        site = AdminSite()
+        task_admin = TaskAdmin(Task, site)
+
+        task = Task.objects.create(
+            organization=self.organization,
+            title="Rappel Devis",
+            due_date=timezone.now() - timedelta(days=2),  # en retard
+            priority=TaskPriority.URGENT,
+            contact=self.contact,
+        )
+
+        # 1. Vérification de l'indicateur visuel d'échéance Unfold
+        due_status = task_admin.display_due_status(task)
+        self.assertIn("🚨 Retard (2j)", due_status)
+
+        # 2. Action Terminer la tâche
+        task.mark_completed()
+        task.refresh_from_db()
+        self.assertEqual(task.status, TaskStatus.COMPLETED)
+        completed_status = task_admin.display_due_status(task)
+        self.assertIn("✅ Fait", completed_status)
+
+    def test_task_mark_completed_logs_interaction(self):
+        task = Task.objects.create(
+            organization=self.organization,
+            title="Appel de cadrage client",
+            description="Vérifier les besoins d'intégration API",
+            due_date=timezone.now(),
+            contact=self.contact,
+            assigned_to=self.user,
+        )
+        task.mark_completed(log_interaction=True)
+        task.refresh_from_db()
+        self.assertEqual(task.status, TaskStatus.COMPLETED)
+
+        # Vérification qu'une interaction a été consignée dans la timeline
+        interaction = Interaction.objects.filter(contact=self.contact, title__contains="Appel de cadrage").first()
+        self.assertIsNotNone(interaction)
+        self.assertIn("Réalisée le", interaction.content)
+        self.assertEqual(interaction.user, self.user)
+
+    def test_contact_workflow_on_qualification(self):
+        from django.core import mail
+
+        WorkflowRule.objects.create(
+            organization=self.organization,
+            name="Workflow Nouveau Lead Qualifié",
+            trigger_event=WorkflowTrigger.CONTACT_QUALIFIED,
+            action_type=WorkflowAction.CREATE_TASK_AND_EMAIL,
+            task_title="Démo produit pour {contact_name}",
+            task_delay_days=2,
+            email_subject="Bienvenue chez nous {contact_name}",
+            email_body="Bonjour {contact_name},\nNous sommes ravis d'échanger avec vous.",
+        )
+
+        contact = Contact.objects.create(
+            organization=self.organization,
+            first_name="Sophie",
+            last_name="Martin",
+            email="sophie.martin@example.com",
+            lead_status=LeadStatus.NEW,
+            owner=self.user,
+        )
+
+        # Qualification du prospect
+        contact.lead_status = LeadStatus.QUALIFIED
+        contact.save()
+
+        # 1. Vérification de la tâche créée à J+2
+        task = Task.objects.filter(contact=contact).first()
+        self.assertIsNotNone(task)
+        self.assertEqual(task.title, "Démo produit pour Sophie Martin")
+        expected_due = timezone.now() + timedelta(days=2)
+        self.assertEqual(task.due_date.date(), expected_due.date())
+
+        # 2. Vérification de l'e-mail envoyé
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("Sophie Martin", mail.outbox[0].subject)
+
+        # 3. Vérification de l'interaction tracée
+        interaction = Interaction.objects.filter(contact=contact, type=InteractionType.EMAIL).first()
+        self.assertIsNotNone(interaction)
+        self.assertIn("E-mail automatique", interaction.title)
+
+    def test_anti_enumeration_uuid_generation(self):
+        import uuid
+        # Vérification de la présence d'un UUID unique non-nul sur chaque modèle
+        self.assertIsInstance(self.organization.uuid, uuid.UUID)
+        self.assertIsInstance(self.company.uuid, uuid.UUID)
+        self.assertIsInstance(self.contact.uuid, uuid.UUID)
+
+        deal = Deal.objects.create(
+            organization=self.organization,
+            title="UUID Test Deal",
+            contact=self.contact,
+        )
+        self.assertIsInstance(deal.uuid, uuid.UUID)
+        self.assertNotEqual(self.organization.uuid, deal.uuid)
+
+    def test_soft_delete_and_restore_cycle(self):
+        company = Company.objects.create(
+            organization=self.organization,
+            name="Société Test Corbeille",
+        )
+        self.assertFalse(company.is_deleted)
+        self.assertIsNone(company.deleted_at)
+
+        # 1. Mise à la corbeille (Soft delete)
+        company.soft_delete()
+        company.refresh_from_db()
+        self.assertTrue(company.is_deleted)
+        self.assertIsNotNone(company.deleted_at)
+
+        # Vérifier que .alive() l'exclut et .deleted() la récupère
+        self.assertFalse(Company.objects.alive().filter(pk=company.pk).exists())
+        self.assertTrue(Company.objects.deleted().filter(pk=company.pk).exists())
+
+        # 2. Restauration depuis la corbeille
+        company.restore()
+        company.refresh_from_db()
+        self.assertFalse(company.is_deleted)
+        self.assertIsNone(company.deleted_at)
+        self.assertTrue(Company.objects.alive().filter(pk=company.pk).exists())
+
+    def test_organization_memberships_multi_workspace(self):
+        from django.db import IntegrityError
+
+        org_beta = Organization.objects.create(
+            name="SaaS Workspace Beta",
+            slug="workspace-beta",
+        )
+
+        # Adhésion de l'utilisateur à l'espace Alpha (Propriétaire)
+        mem_alpha = OrganizationMembership.objects.create(
+            organization=self.organization,
+            user=self.user,
+            role=OrganizationRole.OWNER,
+            is_default=True,
+        )
+        self.assertEqual(mem_alpha.role, OrganizationRole.OWNER)
+        self.assertTrue(mem_alpha.is_default)
+
+        # Adhésion du même utilisateur à l'espace Beta (Collaborateur)
+        mem_beta = OrganizationMembership.objects.create(
+            organization=org_beta,
+            user=self.user,
+            role=OrganizationRole.MEMBER,
+            is_default=False,
+        )
+        self.assertEqual(mem_beta.organization, org_beta)
+
+        # Vérifier les adhésions multiples
+        user_memberships = self.user.memberships.all()
+        self.assertEqual(user_memberships.count(), 2)
+
+        # Vérifier la contrainte d'unicité (user, organization)
+        with self.assertRaises(IntegrityError):
+            OrganizationMembership.objects.create(
+                organization=self.organization,
+                user=self.user,
+                role=OrganizationRole.VIEWER,
+            )

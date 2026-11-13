@@ -6,12 +6,24 @@ from django.db.models import Sum, F, ExpressionWrapper, DecimalField
 from django.utils import timezone
 
 
-class ContactQuerySet(models.QuerySet):
+class SoftDeleteQuerySet(models.QuerySet):
+    """QuerySet de base fournissant le filtrage pour la suppression douce (corbeille)."""
+
+    def alive(self):
+        """Retourne uniquement les enregistrements non supprimés."""
+        return self.filter(deleted_at__isnull=True)
+
+    def deleted(self):
+        """Retourne les enregistrements placés dans la corbeille."""
+        return self.filter(deleted_at__isnull=False)
+
+
+class ContactQuerySet(SoftDeleteQuerySet):
     """QuerySet optimisé pour le modèle Contact."""
 
     def with_related(self) -> "ContactQuerySet":
         """Évite les requêtes N+1 en préchargeant l'entreprise et le responsable."""
-        return self.select_related("company", "owner")
+        return self.select_related("organization", "company", "owner")
 
     def for_user(self, user) -> "ContactQuerySet":
         """Filtre les contacts pour un utilisateur donné (RBAC)."""
@@ -21,24 +33,24 @@ class ContactQuerySet(models.QuerySet):
 
     def hot_leads(self, min_score: int = 50) -> "ContactQuerySet":
         """Retourne les prospects chauds basés sur le score ou le statut."""
-        return self.filter(
+        return self.alive().filter(
             models.Q(lead_score__gte=min_score) | models.Q(lead_status="QUALIFIED")
         )
 
     def needs_follow_up(self, days: int = 30) -> "ContactQuerySet":
         """Identifie les contacts sans interaction depuis un certain nombre de jours."""
         cutoff_date = timezone.now() - timedelta(days=days)
-        return self.filter(
+        return self.alive().filter(
             models.Q(last_activity_at__lt=cutoff_date) | models.Q(last_activity_at__isnull=True)
         )
 
 
-class CompanyQuerySet(models.QuerySet):
+class CompanyQuerySet(SoftDeleteQuerySet):
     """QuerySet optimisé pour le modèle Company."""
 
     def with_related(self) -> "CompanyQuerySet":
         """Évite les requêtes N+1 en préchargeant le responsable."""
-        return self.select_related("owner")
+        return self.select_related("organization", "owner")
 
     def for_user(self, user) -> "CompanyQuerySet":
         if user.is_superuser or user.has_perm("core.view_all_companies"):
@@ -46,12 +58,12 @@ class CompanyQuerySet(models.QuerySet):
         return self.filter(owner=user)
 
 
-class DealQuerySet(models.QuerySet):
+class DealQuerySet(SoftDeleteQuerySet):
     """QuerySet optimisé pour le modèle Deal."""
 
     def with_related(self) -> "DealQuerySet":
         """Évite les requêtes N+1 en préchargeant contact, entreprise et responsable."""
-        return self.select_related("contact", "company", "owner")
+        return self.select_related("organization", "contact", "company", "owner")
 
     def for_user(self, user) -> "DealQuerySet":
         if user.is_superuser or user.has_perm("core.view_all_deals"):
@@ -59,14 +71,14 @@ class DealQuerySet(models.QuerySet):
         return self.filter(owner=user)
 
     def active(self) -> "DealQuerySet":
-        """Retourne les opportunités en cours dans le pipeline."""
-        return self.exclude(stage__in=["WON", "LOST"])
+        """Retourne les opportunités en cours dans le pipeline (non archivées/supprimées)."""
+        return self.alive().exclude(stage__in=["WON", "LOST"])
 
     def won(self) -> "DealQuerySet":
-        return self.filter(stage="WON")
+        return self.alive().filter(stage="WON")
 
     def lost(self) -> "DealQuerySet":
-        return self.filter(stage="LOST")
+        return self.alive().filter(stage="LOST")
 
     def total_pipeline_amount(self) -> Decimal:
         """Calcule le montant brut total des deals actifs."""
@@ -83,12 +95,12 @@ class DealQuerySet(models.QuerySet):
         return result or Decimal("0.00")
 
 
-class InteractionQuerySet(models.QuerySet):
+class InteractionQuerySet(SoftDeleteQuerySet):
     """QuerySet optimisé pour les interactions (Timeline)."""
 
     def with_related(self) -> "InteractionQuerySet":
         """Précharge les relations pour un affichage rapide de la timeline."""
-        return self.select_related("contact", "company", "deal", "user")
+        return self.select_related("organization", "contact", "company", "deal", "user")
 
     def bulk_create_and_sync(
         self,
@@ -154,24 +166,23 @@ class InteractionQuerySet(models.QuerySet):
         return created_objs
 
 
-class TaskQuerySet(models.QuerySet):
+class TaskQuerySet(SoftDeleteQuerySet):
     """QuerySet optimisé pour les tâches et rappels."""
 
     def with_related(self) -> "TaskQuerySet":
-        return self.select_related("contact", "company", "deal", "assigned_to")
+        return self.select_related("organization", "contact", "company", "deal", "assigned_to")
 
     def pending(self) -> "TaskQuerySet":
-        return self.filter(status="PENDING")
+        return self.alive().filter(status="PENDING")
 
     def completed(self) -> "TaskQuerySet":
-        return self.filter(status="COMPLETED")
+        return self.alive().filter(status="COMPLETED")
 
     def overdue(self) -> "TaskQuerySet":
         """Tâches non complétées dont la date d'échéance est passée."""
-        return self.filter(status="PENDING", due_date__lt=timezone.now())
+        return self.alive().filter(status="PENDING", due_date__lt=timezone.now())
 
     def due_today(self) -> "TaskQuerySet":
         """Tâches à traiter aujourd'hui."""
         today = timezone.now().date()
-        return self.filter(status="PENDING", due_date__date=today)
-
+        return self.alive().filter(status="PENDING", due_date__date=today)
