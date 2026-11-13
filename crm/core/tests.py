@@ -800,3 +800,218 @@ class CoreModelTestCase(TestCase):
                 user=self.user,
                 role=OrganizationRole.VIEWER,
             )
+
+    def test_crm_kpi_summary_reporting(self):
+        from .reporting import get_crm_kpi_summary
+
+        # Création de deals de test
+        deal_active = Deal.objects.create(
+            organization=self.organization,
+            title="Deal En Négociation",
+            amount=Decimal("10000.00"),
+            stage=DealStage.NEGOTIATION,
+            probability=50,
+            contact=self.contact,
+            owner=self.user,
+        )
+        deal_won = Deal.objects.create(
+            organization=self.organization,
+            title="Deal Signé",
+            amount=Decimal("20000.00"),
+            stage=DealStage.WON,
+            probability=100,
+            contact=self.contact,
+            owner=self.user,
+            closed_at=timezone.now(),
+        )
+        deal_lost = Deal.objects.create(
+            organization=self.organization,
+            title="Deal Abandonné Prix",
+            amount=Decimal("5000.00"),
+            stage=DealStage.LOST,
+            loss_reason=LossReason.PRICE,
+            contact=self.contact,
+            owner=self.user,
+            closed_at=timezone.now(),
+        )
+
+        # Création de tâches de test
+        Task.objects.create(
+            organization=self.organization,
+            title="Tâche En Retard",
+            due_date=timezone.now() - timedelta(days=3),
+            status=TaskStatus.PENDING,
+            contact=self.contact,
+            assigned_to=self.user,
+        )
+        Task.objects.create(
+            organization=self.organization,
+            title="Tâche Du Jour",
+            due_date=timezone.now(),
+            status=TaskStatus.PENDING,
+            contact=self.contact,
+            assigned_to=self.user,
+        )
+
+        # Calcul des KPIs
+        kpis = get_crm_kpi_summary(organization_id=self.organization.id, days=30)
+
+        # Vérifications financières
+        self.assertEqual(kpis["weighted_pipeline"], Decimal("5000.00"))
+        self.assertEqual(kpis["total_active_pipeline"], Decimal("10000.00"))
+        self.assertEqual(kpis["won_revenue_period"], Decimal("20000.00"))
+        self.assertEqual(kpis["won_deals_count_period"], 1)
+
+        # Vérifications taux de conversion (1 Won / (1 Won + 1 Lost) = 50%)
+        self.assertEqual(kpis["win_rate"], 50.0)
+
+        # Vérifications motifs d'abandon
+        self.assertTrue(any(r["code"] == LossReason.PRICE for r in kpis["loss_reasons_summary"]))
+
+        # Vérifications des urgences ("Qui relancer aujourd'hui")
+        self.assertGreaterEqual(kpis["overdue_tasks_count"], 1)
+        self.assertGreaterEqual(kpis["today_tasks_count"], 1)
+        self.assertTrue(len(kpis["top_urgent_tasks"]) > 0)
+
+    def test_contact_segmentation_querysets(self):
+        # 1. Contact inactif (> 30j)
+        old_time = timezone.now() - timedelta(days=45)
+        inactive_contact = Contact.objects.create(
+            organization=self.organization,
+            first_name="Marc",
+            last_name="Inactif",
+            lead_status=LeadStatus.CONTACTED,
+            last_activity_at=old_time,
+        )
+
+        # 2. Contact chaud non converti (score >= 70 et pas client)
+        hot_contact = Contact.objects.create(
+            organization=self.organization,
+            first_name="Claire",
+            last_name="Chaude",
+            lead_status=LeadStatus.QUALIFIED,
+            lead_score=80,
+        )
+
+        # 3. Client dormant (> 60j)
+        dormant_client = Contact.objects.create(
+            organization=self.organization,
+            first_name="Pierre",
+            last_name="Dormant",
+            lead_status=LeadStatus.CUSTOMER,
+            last_activity_at=timezone.now() - timedelta(days=70),
+        )
+
+        # Vérification des QuerySets de segmentation
+        inactive_list = Contact.objects.filter(organization=self.organization).inactive_for(days=30)
+        self.assertIn(inactive_contact, inactive_list)
+
+        hot_list = Contact.objects.filter(organization=self.organization).hot_unconverted()
+        self.assertIn(hot_contact, hot_list)
+        self.assertNotIn(dormant_client, hot_list)
+
+        dormant_list = Contact.objects.filter(organization=self.organization).dormant_customers(days=60)
+        self.assertIn(dormant_client, dormant_list)
+
+        no_task_list = Contact.objects.filter(organization=self.organization).without_pending_tasks()
+        self.assertIn(inactive_contact, no_task_list)
+
+    def test_deal_segmentation_querysets(self):
+        now = timezone.now().date()
+        closing_deal = Deal.objects.create(
+            organization=self.organization,
+            title="Deal Fin de Mois",
+            amount=Decimal("15000.00"),
+            stage=DealStage.PROPOSAL,
+            expected_close_date=now + timedelta(days=10),
+            contact=self.contact,
+        )
+        stalled_deal = Deal.objects.create(
+            organization=self.organization,
+            title="Deal Bloqué",
+            amount=Decimal("8000.00"),
+            stage=DealStage.LEAD,
+            last_activity_at=timezone.now() - timedelta(days=20),
+            contact=self.contact,
+        )
+
+        closing_qs = Deal.objects.filter(organization=self.organization).closing_in_period(days=30)
+        self.assertIn(closing_deal, closing_qs)
+
+        stalled_qs = Deal.objects.filter(organization=self.organization).stalled(days=15)
+        self.assertIn(stalled_deal, stalled_qs)
+
+    def test_admin_batch_schedule_followup_action(self):
+        from .admin import ContactAdmin
+        from django.contrib.admin.sites import AdminSite
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
+        site = AdminSite()
+        contact_admin = ContactAdmin(Contact, site)
+        rf = RequestFactory()
+        request = rf.post("/admin/core/contact/")
+        request.user = self.user
+        setattr(request, "session", {})
+        setattr(request, "_messages", FallbackStorage(request))
+
+        contacts = Contact.objects.filter(id=self.contact.id)
+        contact_admin.batch_schedule_followup_action(request, contacts)
+
+        # Vérification qu'une tâche de relance à J+2 a été créée pour le contact
+        created_task = Task.objects.filter(contact=self.contact, title__contains="Relance ciblée").first()
+        self.assertIsNotNone(created_task)
+        self.assertEqual(created_task.organization, self.organization)
+        self.assertEqual(created_task.priority, TaskPriority.HIGH)  # Car lead_score >= 70
+
+    def test_admin_export_csv_actions(self):
+        from .admin import ContactAdmin, DealAdmin
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+
+        site = AdminSite()
+        rf = RequestFactory()
+        request = rf.get("/admin/")
+        request.user = self.user
+
+        # 1. Export CSV Contacts
+        contact_admin = ContactAdmin(Contact, site)
+        resp_contact = contact_admin.export_segment_csv_action(request, Contact.objects.filter(id=self.contact.id))
+        self.assertEqual(resp_contact.status_code, 200)
+        self.assertEqual(resp_contact["Content-Type"], "text/csv; charset=utf-8-sig")
+        content_contact = resp_contact.content.decode("utf-8-sig")
+        self.assertIn("Jean Dupont", content_contact)
+        self.assertIn("jean.dupont@acme.com", content_contact)
+
+        # 2. Export CSV Deals
+        deal = Deal.objects.create(
+            organization=self.organization,
+            title="Contrat Cloud 2026",
+            amount=Decimal("12000.00"),
+            stage=DealStage.PROPOSAL,
+            contact=self.contact,
+        )
+        deal_admin = DealAdmin(Deal, site)
+        resp_deal = deal_admin.export_pipeline_csv_action(request, Deal.objects.filter(id=deal.id))
+        self.assertEqual(resp_deal.status_code, 200)
+        self.assertEqual(resp_deal["Content-Type"], "text/csv; charset=utf-8-sig")
+        content_deal = resp_deal.content.decode("utf-8-sig")
+        self.assertIn("Contrat Cloud 2026", content_deal)
+        self.assertIn("12000.00", content_deal)
+
+    def test_unfold_dashboard_renders_with_kpi_metrics(self):
+        self.user.is_staff = True
+        self.user.is_superuser = True
+        self.user.save()
+
+        self.client.force_login(self.user)
+        response = self.client.get("/admin/")
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+
+        self.assertIn("Tableau de Bord Commercial", content)
+        self.assertIn("CA Prévisionnel (Pondéré)", content)
+        self.assertIn("Pipeline Commercial Brut", content)
+        self.assertIn("Entonnoir de Conversion Commercial", content)
+        self.assertIn("Segmentation Avancée & Actions Ciblées", content)
+        self.assertIn("Qui relancer aujourd'hui", content)

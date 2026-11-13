@@ -1,0 +1,426 @@
+{% extends 'admin/base.html' %}
+{% load i18n %}
+
+{% block title %}Tableau de Bord & Pilotage Commercial | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block content %}
+<div class="px-4 py-4 md:px-8 space-y-8">
+
+    <!-- 1. En-tête du Tableau de Bord & Sélecteurs -->
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 p-6 rounded-2xl shadow-xs">
+        <div>
+            <div class="flex items-center gap-2">
+                <span class="inline-flex items-center justify-center p-2 rounded-xl bg-primary-100 dark:bg-primary-950 text-primary-600 dark:text-primary-400">
+                    <span class="material-symbols-outlined text-2xl">analytics</span>
+                </span>
+                <div>
+                    <h1 class="text-2xl font-bold tracking-tight text-base-900 dark:text-white">
+                        Tableau de Bord Commercial
+                    </h1>
+                    <p class="text-xs text-base-500 dark:text-base-400 mt-0.5">
+                        Vue synthétique du prévisionnel, de l'entonnoir de conversion et des relances prioritaires.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3">
+            <!-- Sélecteur de Période (30j, 90j, 7j) -->
+            <div class="flex items-center bg-base-100 dark:bg-base-800 p-1 rounded-xl border border-base-200 dark:border-base-700 text-xs font-semibold">
+                <a href="?days=7{% if selected_org %}&org={{ selected_org }}{% endif %}" class="px-3 py-1.5 rounded-lg transition {% if selected_days == 7 %}bg-white dark:bg-base-700 text-primary-600 dark:text-primary-400 shadow-xs{% else %}text-base-600 dark:text-base-400 hover:text-base-900{% endif %}">
+                    7 jours
+                </a>
+                <a href="?days=30{% if selected_org %}&org={{ selected_org }}{% endif %}" class="px-3 py-1.5 rounded-lg transition {% if selected_days == 30 %}bg-white dark:bg-base-700 text-primary-600 dark:text-primary-400 shadow-xs{% else %}text-base-600 dark:text-base-400 hover:text-base-900{% endif %}">
+                    30 jours
+                </a>
+                <a href="?days=90{% if selected_org %}&org={{ selected_org }}{% endif %}" class="px-3 py-1.5 rounded-lg transition {% if selected_days == 90 %}bg-white dark:bg-base-700 text-primary-600 dark:text-primary-400 shadow-xs{% else %}text-base-600 dark:text-base-400 hover:text-base-900{% endif %}">
+                    90 jours
+                </a>
+            </div>
+
+            <!-- Raccourci vers Kanban -->
+            <a href="{% url 'admin:core_deal_kanban' %}" class="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-primary-600 hover:bg-primary-500 text-white text-xs font-semibold shadow-xs transition">
+                <span class="material-symbols-outlined text-base">view_kanban</span>
+                Pipeline Kanban
+            </a>
+        </div>
+    </div>
+
+    <!-- Filtre Tenant si Multi-Organisations pour Superuser -->
+    {% if organizations and organizations|length > 1 %}
+    <div class="flex items-center gap-3 bg-base-50 dark:bg-base-900 px-4 py-3 rounded-xl border border-base-200 dark:border-base-800 text-xs">
+        <span class="font-semibold text-base-700 dark:text-base-300 flex items-center gap-1">
+            <span class="material-symbols-outlined text-sm">apartment</span> Organisation active :
+        </span>
+        <a href="?days={{ selected_days }}" class="px-2.5 py-1 rounded-lg font-medium transition {% if not selected_org %}bg-primary-600 text-white{% else %}text-base-600 dark:text-base-400 hover:bg-base-200 dark:hover:bg-base-800{% endif %}">
+            Toutes
+        </a>
+        {% for org in organizations %}
+        <a href="?days={{ selected_days }}&org={{ org.id }}" class="px-2.5 py-1 rounded-lg font-medium transition {% if selected_org == org.id|stringformat:'s' %}bg-primary-600 text-white{% else %}text-base-600 dark:text-base-400 hover:bg-base-200 dark:hover:bg-base-800{% endif %}">
+            {{ org.name }}
+        </a>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- 2. Les 4 Cartes Métriques Clés (KPI Cards) -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+        <!-- KPI 1 : CA Prévisionnel Pondéré -->
+        <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 p-5 rounded-2xl shadow-xs relative overflow-hidden group hover:border-emerald-500/50 transition">
+            <div class="flex items-center justify-between">
+                <span class="text-xs uppercase font-semibold text-base-500 dark:text-base-400 tracking-wider">
+                    CA Prévisionnel (Pondéré)
+                </span>
+                <span class="p-2 rounded-xl bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400">
+                    <span class="material-symbols-outlined text-xl">trending_up</span>
+                </span>
+            </div>
+            <div class="mt-3">
+                <p class="text-2xl font-black text-emerald-600 dark:text-emerald-400">
+                    {{ kpis.weighted_pipeline|floatformat:2 }} €
+                </p>
+                <p class="text-xs text-base-500 dark:text-base-400 mt-1">
+                    Probabilité × Montant du pipeline actif
+                </p>
+            </div>
+        </div>
+
+        <!-- KPI 2 : Total Pipeline Brut -->
+        <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 p-5 rounded-2xl shadow-xs relative overflow-hidden group hover:border-primary-500/50 transition">
+            <div class="flex items-center justify-between">
+                <span class="text-xs uppercase font-semibold text-base-500 dark:text-base-400 tracking-wider">
+                    Pipeline Commercial Brut
+                </span>
+                <span class="p-2 rounded-xl bg-primary-50 dark:bg-primary-950 text-primary-600 dark:text-primary-400">
+                    <span class="material-symbols-outlined text-xl">monetization_on</span>
+                </span>
+            </div>
+            <div class="mt-3">
+                <p class="text-2xl font-black text-base-900 dark:text-white">
+                    {{ kpis.total_active_pipeline|floatformat:2 }} €
+                </p>
+                <p class="text-xs text-base-500 dark:text-base-400 mt-1">
+                    {{ kpis.total_deals_count }} opportunités au total
+                </p>
+            </div>
+        </div>
+
+        <!-- KPI 3 : CA Gagné (Signé) -->
+        <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 p-5 rounded-2xl shadow-xs relative overflow-hidden group hover:border-amber-500/50 transition">
+            <div class="flex items-center justify-between">
+                <span class="text-xs uppercase font-semibold text-base-500 dark:text-base-400 tracking-wider">
+                    CA Gagné ({{ kpis.days }}j)
+                </span>
+                <span class="p-2 rounded-xl bg-amber-50 dark:bg-amber-950 text-amber-600 dark:text-amber-400">
+                    <span class="material-symbols-outlined text-xl">emoji_events</span>
+                </span>
+            </div>
+            <div class="mt-3">
+                <p class="text-2xl font-black text-amber-600 dark:text-amber-400">
+                    {{ kpis.won_revenue_period|floatformat:2 }} €
+                </p>
+                <p class="text-xs text-base-500 dark:text-base-400 mt-1">
+                    {{ kpis.won_deals_count_period }} deal(s) clôturé(s) • Taux victoire: <span class="font-bold text-amber-600">{{ kpis.win_rate }}%</span>
+                </p>
+            </div>
+        </div>
+
+        <!-- KPI 4 : Nouveaux Prospects -->
+        <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 p-5 rounded-2xl shadow-xs relative overflow-hidden group hover:border-blue-500/50 transition">
+            <div class="flex items-center justify-between">
+                <span class="text-xs uppercase font-semibold text-base-500 dark:text-base-400 tracking-wider">
+                    Nouveaux Leads ({{ kpis.days }}j)
+                </span>
+                <span class="p-2 rounded-xl bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400">
+                    <span class="material-symbols-outlined text-xl">person_add</span>
+                </span>
+            </div>
+            <div class="mt-3">
+                <p class="text-2xl font-black text-blue-600 dark:text-blue-400">
+                    +{{ kpis.new_leads_period }}
+                </p>
+                <p class="text-xs text-base-500 dark:text-base-400 mt-1">
+                    Total base : {{ kpis.total_contacts_count }} • 🔥 {{ kpis.hot_leads_count }} chauds
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3. Entonnoir de Vente Commercial (Pipeline & Conversion Funnel) -->
+    <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 p-6 rounded-2xl shadow-xs space-y-5">
+        <div class="flex items-center justify-between">
+            <div>
+                <h2 class="text-base font-bold text-base-900 dark:text-white flex items-center gap-2">
+                    <span class="material-symbols-outlined text-primary-600 dark:text-primary-400">filter_alt</span>
+                    Entonnoir de Conversion Commercial
+                </h2>
+                <p class="text-xs text-base-500 dark:text-base-400">
+                    Répartition des opportunités et montants par étape du cycle de vente.
+                </p>
+            </div>
+            <div class="text-right">
+                <span class="text-xs text-base-500 dark:text-base-400">Taux de conversion global</span>
+                <p class="text-sm font-extrabold text-primary-600 dark:text-primary-400">
+                    {{ kpis.global_conversion }}% des opportunités
+                </p>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            {% for stage in kpis.funnel_data %}
+            <div class="bg-base-50 dark:bg-base-850 p-4 rounded-xl border border-base-200 dark:border-base-800 flex flex-col justify-between">
+                <div>
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-bold text-base-800 dark:text-base-200 truncate">
+                            {{ stage.label }}
+                        </span>
+                        <span class="text-xs font-bold px-1.5 py-0.5 rounded-full {% if stage.code == 'WON' %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300{% elif stage.code == 'LOST' %}bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300{% else %}bg-base-200 dark:bg-base-700 text-base-800 dark:text-base-300{% endif %}">
+                            {{ stage.count }}
+                        </span>
+                    </div>
+                    <p class="text-sm font-extrabold text-base-900 dark:text-white mt-2">
+                        {{ stage.amount|floatformat:0 }} €
+                    </p>
+                </div>
+
+                <!-- Jauge visuelle de conversion -->
+                <div class="mt-3">
+                    <div class="w-full bg-base-200 dark:bg-base-700 h-1.5 rounded-full overflow-hidden">
+                        <div class="h-full rounded-full {% if stage.code == 'WON' %}bg-emerald-500{% elif stage.code == 'LOST' %}bg-rose-500{% else %}bg-primary-500{% endif %}" style="width: {{ stage.percentage }}%"></div>
+                    </div>
+                    <span class="text-[10px] text-base-400 mt-1 block">
+                        {% if stage.code == 'WON' or stage.code == 'LOST' %}{{ stage.count }} deal(s){% else %}{{ stage.percentage }}% du pipeline{% endif %}
+                    </span>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- 4. Segments Stratégiques & Raccourcis de Ciblage -->
+    <div class="space-y-3">
+        <div class="flex items-center justify-between">
+            <h2 class="text-base font-bold text-base-900 dark:text-white flex items-center gap-2">
+                <span class="material-symbols-outlined text-amber-500">segment</span>
+                Segmentation Avancée & Actions Ciblées
+            </h2>
+            <a href="{% url 'admin:core_contact_changelist' %}" class="text-xs text-primary-600 hover:underline font-semibold">
+                Voir tous les contacts →
+            </a>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <!-- Segment 1: Inactifs > 30j -->
+            <a href="{% url 'admin:core_contact_changelist' %}?segment=inactive_30d" class="p-4 bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 hover:border-amber-500 dark:hover:border-amber-500 rounded-xl shadow-xs transition group">
+                <div class="flex items-center justify-between">
+                    <span class="text-xs font-bold text-amber-600 dark:text-amber-400 flex items-center gap-1.5">
+                        <span class="material-symbols-outlined text-base">timer_off</span>
+                        Inactifs > 30 jours
+                    </span>
+                    <span class="text-lg font-black text-base-900 dark:text-white group-hover:text-amber-500">
+                        {{ kpis.segments_summary.inactive_30d }}
+                    </span>
+                </div>
+                <p class="text-xs text-base-500 dark:text-base-400 mt-1">
+                    Prospects sans interaction depuis un mois. Relance prioritaire.
+                </p>
+            </a>
+
+            <!-- Segment 2: Leads chauds non convertis -->
+            <a href="{% url 'admin:core_contact_changelist' %}?segment=hot_unconverted" class="p-4 bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 hover:border-rose-500 dark:hover:border-rose-500 rounded-xl shadow-xs transition group">
+                <div class="flex items-center justify-between">
+                    <span class="text-xs font-bold text-rose-600 dark:text-rose-400 flex items-center gap-1.5">
+                        <span class="material-symbols-outlined text-base">local_fire_department</span>
+                        Chauds non convertis
+                    </span>
+                    <span class="text-lg font-black text-base-900 dark:text-white group-hover:text-rose-500">
+                        {{ kpis.segments_summary.hot_unconverted }}
+                    </span>
+                </div>
+                <p class="text-xs text-base-500 dark:text-base-400 mt-1">
+                    Score ≥ 70 ou qualifiés en attente de proposition commerciale.
+                </p>
+            </a>
+
+            <!-- Segment 3: Sans relance planifiée -->
+            <a href="{% url 'admin:core_contact_changelist' %}?segment=no_pending_tasks" class="p-4 bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 hover:border-blue-500 dark:hover:border-blue-500 rounded-xl shadow-xs transition group">
+                <div class="flex items-center justify-between">
+                    <span class="text-xs font-bold text-blue-600 dark:text-blue-400 flex items-center gap-1.5">
+                        <span class="material-symbols-outlined text-base">notification_important</span>
+                        Sans relance prévue
+                    </span>
+                    <span class="text-lg font-black text-base-900 dark:text-white group-hover:text-blue-500">
+                        {{ kpis.segments_summary.without_pending_tasks }}
+                    </span>
+                </div>
+                <p class="text-xs text-base-500 dark:text-base-400 mt-1">
+                    Contacts actifs sans aucune tâche de rappel programmée.
+                </p>
+            </a>
+
+            <!-- Segment 4: Clients dormants (> 60j) -->
+            <a href="{% url 'admin:core_contact_changelist' %}?segment=dormant_customers" class="p-4 bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 hover:border-purple-500 dark:hover:border-purple-500 rounded-xl shadow-xs transition group">
+                <div class="flex items-center justify-between">
+                    <span class="text-xs font-bold text-purple-600 dark:text-purple-400 flex items-center gap-1.5">
+                        <span class="material-symbols-outlined text-base">sentiment_dissatisfied</span>
+                        Clients dormants (> 60j)
+                    </span>
+                    <span class="text-lg font-black text-base-900 dark:text-white group-hover:text-purple-500">
+                        {{ kpis.segments_summary.dormant_customers }}
+                    </span>
+                </div>
+                <p class="text-xs text-base-500 dark:text-base-400 mt-1">
+                    Clients historiques sans contact récent. Risque d'attrition.
+                </p>
+            </a>
+        </div>
+    </div>
+
+    <!-- 5. Deux Colonnes : Urgences de Relance ("Qui relancer aujourd'hui") & Deals Clés -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+        <!-- Colonne Gauche : Tâches & Relances Prioritaires -->
+        <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 p-5 rounded-2xl shadow-xs space-y-4">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h3 class="font-bold text-sm text-base-900 dark:text-white flex items-center gap-2">
+                        <span class="material-symbols-outlined text-rose-500">notification_important</span>
+                        Qui relancer aujourd'hui (Priorités)
+                    </h3>
+                    <p class="text-xs text-base-500 dark:text-base-400">
+                        {{ kpis.overdue_tasks_count }} en retard • {{ kpis.today_tasks_count }} pour aujourd'hui
+                    </p>
+                </div>
+                <a href="{% url 'admin:core_task_changelist' %}" class="text-xs text-primary-600 hover:underline font-semibold">
+                    Toutes les tâches →
+                </a>
+            </div>
+
+            <div class="space-y-2.5">
+                {% for task in kpis.top_urgent_tasks %}
+                <div class="p-3 bg-base-50 dark:bg-base-850 border border-base-200 dark:border-base-800 rounded-xl flex items-center justify-between gap-3">
+                    <div class="min-w-0 flex-1">
+                        <a href="{% url 'admin:core_task_change' task.id %}" class="text-xs font-semibold text-base-900 dark:text-white hover:text-primary-600 truncate block">
+                            {{ task.title }}
+                        </a>
+                        <div class="flex items-center gap-2 mt-1 text-[11px] text-base-500 dark:text-base-400">
+                            {% if task.contact %}
+                            <span class="truncate">👤 {{ task.contact.full_name }}</span>
+                            {% elif task.company %}
+                            <span class="truncate">🏢 {{ task.company.name }}</span>
+                            {% endif %}
+                            <span>• Échéance: {{ task.due_date|date:"d/m" }}</span>
+                        </div>
+                    </div>
+                    <div class="shrink-0 flex items-center gap-1.5">
+                        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full {% if task.priority == 'URGENT' %}bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300{% elif task.priority == 'HIGH' %}bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300{% else %}bg-base-200 dark:bg-base-700 text-base-700 dark:text-base-300{% endif %}">
+                            {{ task.get_priority_display }}
+                        </span>
+                    </div>
+                </div>
+                {% empty %}
+                <div class="text-center py-8 text-xs text-base-400">
+                    <span class="material-symbols-outlined text-3xl text-emerald-500 mb-1 block">task_alt</span>
+                    Aucune tâche en retard ! Vos relances commerciales sont à jour.
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Colonne Droite : Deals Clés à Clôturer -->
+        <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 p-5 rounded-2xl shadow-xs space-y-4">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h3 class="font-bold text-sm text-base-900 dark:text-white flex items-center gap-2">
+                        <span class="material-symbols-outlined text-emerald-500">target</span>
+                        Opportunités Clés (Clôture ce mois-ci)
+                    </h3>
+                    <p class="text-xs text-base-500 dark:text-base-400">
+                        Top opportunités actives ayant le plus fort impact prévisionnel.
+                    </p>
+                </div>
+                <a href="{% url 'admin:core_deal_kanban' %}" class="text-xs text-primary-600 hover:underline font-semibold">
+                    Vue Kanban →
+                </a>
+            </div>
+
+            <div class="space-y-2.5">
+                {% for deal in kpis.top_closing_deals %}
+                <div class="p-3 bg-base-50 dark:bg-base-850 border border-base-200 dark:border-base-800 rounded-xl flex items-center justify-between gap-3">
+                    <div class="min-w-0 flex-1">
+                        <a href="{% url 'admin:core_deal_change' deal.id %}" class="text-xs font-semibold text-base-900 dark:text-white hover:text-primary-600 truncate block">
+                            {{ deal.title }}
+                        </a>
+                        <div class="flex items-center gap-2 mt-1 text-[11px] text-base-500 dark:text-base-400">
+                            {% if deal.contact %}
+                            <span class="truncate">👤 {{ deal.contact.full_name }}</span>
+                            {% endif %}
+                            <span>• {{ deal.get_stage_display }} ({{ deal.probability }}%)</span>
+                        </div>
+                    </div>
+                    <div class="shrink-0 text-right">
+                        <span class="text-xs font-black text-emerald-600 dark:text-emerald-400">
+                            {{ deal.amount|floatformat:0 }} €
+                        </span>
+                        <span class="text-[10px] text-base-400 block">
+                            Pondéré: {{ deal.weighted_amount|floatformat:0 }} €
+                        </span>
+                    </div>
+                </div>
+                {% empty %}
+                <div class="text-center py-8 text-xs text-base-400">
+                    <span class="material-symbols-outlined text-3xl text-base-400 mb-1 block">hourglass_empty</span>
+                    Aucune opportunité prévue pour clôture ce mois-ci.
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+
+    <!-- 6. Analyse des Motifs de Perte (Loss Reason Analytics) -->
+    {% if kpis.loss_reasons_summary %}
+    <div class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 p-5 rounded-2xl shadow-xs space-y-3">
+        <h3 class="font-bold text-sm text-base-900 dark:text-white flex items-center gap-2">
+            <span class="material-symbols-outlined text-rose-500">heart_broken</span>
+            Analyse des Motifs d'Abandon & Pertes Commerciales
+        </h3>
+        <p class="text-xs text-base-500 dark:text-base-400">
+            Comprendre pourquoi les affaires sont perdues permet d'ajuster l'offre et les tarifs.
+        </p>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2">
+            {% for reason in kpis.loss_reasons_summary %}
+            <div class="p-3 bg-base-50 dark:bg-base-850 rounded-xl border border-base-200 dark:border-base-800 flex items-center justify-between">
+                <div>
+                    <span class="text-xs font-semibold text-base-800 dark:text-base-200 block truncate">
+                        {{ reason.label }}
+                    </span>
+                    <span class="text-[11px] text-base-500 dark:text-base-400">
+                        {{ reason.count }} deal(s) • {{ reason.amount|floatformat:0 }} € perdus
+                    </span>
+                </div>
+                <span class="text-xs font-black px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300">
+                    {{ reason.percentage }}%
+                </span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- 7. Section d'administration technique Unfold (Repliable) -->
+    <details class="bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-2xl p-5 shadow-xs group">
+        <summary class="font-bold text-xs uppercase tracking-wider text-base-500 dark:text-base-400 cursor-pointer flex items-center justify-between select-none">
+            <span class="flex items-center gap-2">
+                <span class="material-symbols-outlined text-base">apps</span>
+                Accès direct aux modèles et historique technique
+            </span>
+            <span class="material-symbols-outlined transition group-open:rotate-180">expand_more</span>
+        </summary>
+        <div class="mt-4 pt-4 border-t border-base-100 dark:border-base-800">
+            {% include "unfold/helpers/dashboard_default.html" %}
+        </div>
+    </details>
+
+</div>
+{% endblock %}

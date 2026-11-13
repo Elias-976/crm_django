@@ -1,4 +1,5 @@
 from datetime import timedelta
+from decimal import Decimal
 from django.contrib import admin, messages
 from django.db import models
 from django.shortcuts import get_object_or_404, redirect, render
@@ -129,6 +130,59 @@ class TrashFilter(admin.SimpleListFilter):
         return queryset
 
 
+class ContactSegmentFilter(admin.SimpleListFilter):
+    title = "🎯 Segmentation Stratégique"
+    parameter_name = "segment"
+
+    def lookups(self, request, model_admin):
+        return [
+            ("inactive_30d", "⚠️ Inactifs (> 30 jours sans contact)"),
+            ("hot_unconverted", "🔥 Prospects chauds non convertis"),
+            ("no_pending_tasks", "🚨 Sans tâche de relance prévue"),
+            ("new_30d", "⭐ Nouveaux (30 derniers jours)"),
+            ("dormant_customers", "💤 Clients dormants (> 60 jours)"),
+        ]
+
+    def queryset(self, request, queryset):
+        val = self.value()
+        if val == "inactive_30d":
+            return queryset.inactive_for(days=30)
+        if val == "hot_unconverted":
+            return queryset.hot_unconverted()
+        if val == "no_pending_tasks":
+            return queryset.without_pending_tasks()
+        if val == "new_30d":
+            return queryset.new_in_period(days=30)
+        if val == "dormant_customers":
+            return queryset.dormant_customers(days=60)
+        return queryset
+
+
+class DealSegmentFilter(admin.SimpleListFilter):
+    title = "🎯 Cibles Pipeline & Échéance"
+    parameter_name = "deal_segment"
+
+    def lookups(self, request, model_admin):
+        return [
+            ("closing_soon", "⏳ Clôture ce mois-ci"),
+            ("stalled", "⚠️ Opportunités stagnantes (> 15j)"),
+            ("high_value", "💎 Opportunités majeures (≥ 10 000 €)"),
+            ("won_recent", "🏆 Gagnées récemment (30j)"),
+        ]
+
+    def queryset(self, request, queryset):
+        val = self.value()
+        if val == "closing_soon":
+            return queryset.closing_in_period(days=30)
+        if val == "stalled":
+            return queryset.stalled(days=15)
+        if val == "high_value":
+            return queryset.active().filter(amount__gte=Decimal("10000.00"))
+        if val == "won_recent":
+            return queryset.won_in_period(days=30)
+        return queryset
+
+
 class SoftDeleteAdminMixin:
     """Mixin apportant les actions de corbeille et de restauration rapide."""
 
@@ -248,6 +302,7 @@ class ContactAdmin(SoftDeleteAdminMixin, ModelAdmin):
         "owner",
     )
     list_filter = (
+        ContactSegmentFilter,
         HotLeadFilter,
         FollowUpFilter,
         ("organization", RelatedDropdownFilter),
@@ -259,6 +314,7 @@ class ContactAdmin(SoftDeleteAdminMixin, ModelAdmin):
     search_fields = ("first_name", "last_name", "email", "phone", "company__name")
     readonly_fields = ("uuid", "created_at", "updated_at", "last_activity_at", "deleted_at")
     inlines = [InteractionInline, TaskInline]
+    actions = SoftDeleteAdminMixin.actions + ["batch_schedule_followup_action", "export_segment_csv_action"]
     actions_row = ["qualify_lead_action", "recalculate_score_action"]
 
     fieldsets = (
@@ -350,6 +406,65 @@ class ContactAdmin(SoftDeleteAdminMixin, ModelAdmin):
             messages.success(request, f"Score de '{contact.full_name}' mis à jour : {contact.lead_score}/100.")
         return redirect("admin:core_contact_changelist")
 
+    @action(description="Planifier une relance groupée (J+2) 📅", icon="notification_add")
+    def batch_schedule_followup_action(self, request, queryset):
+        count = 0
+        due_date = timezone.now() + timedelta(days=2)
+        for contact in queryset:
+            Task.objects.create(
+                organization_id=contact.organization_id,
+                title=f"Relance ciblée : {contact.full_name}",
+                description="Rappel généré automatiquement via la segmentation stratégique.",
+                due_date=due_date,
+                priority=TaskPriority.HIGH if contact.lead_score >= 70 else TaskPriority.MEDIUM,
+                assigned_to=contact.owner or request.user,
+                contact=contact,
+                company=contact.company,
+            )
+            count += 1
+        self.message_user(request, f"{count} tâche(s) de relance planifiée(s) à J+2 pour les contacts sélectionnés.")
+
+    @action(description="Exporter le segment en CSV 📥", icon="download")
+    def export_segment_csv_action(self, request, queryset):
+        import csv
+        from django.http import HttpResponse
+
+        response = HttpResponse(content_type="text/csv; charset=utf-8-sig")
+        response["Content-Disposition"] = 'attachment; filename="segment_contacts_crm.csv"'
+
+        writer = csv.writer(response, delimiter=";")
+        writer.writerow([
+            "UUID",
+            "Nom complet",
+            "Prénom",
+            "Nom",
+            "Email",
+            "Téléphone",
+            "Entreprise",
+            "Poste",
+            "Statut Lead",
+            "Score",
+            "Dernière Activité",
+            "Organisation",
+        ])
+
+        for c in queryset.select_related("company", "organization"):
+            writer.writerow([
+                str(c.uuid),
+                c.full_name,
+                c.first_name,
+                c.last_name,
+                c.email or "",
+                c.phone or "",
+                c.company.name if c.company else "",
+                c.job_title or "",
+                c.get_lead_status_display(),
+                c.lead_score,
+                c.last_activity_at.strftime("%d/%m/%Y %H:%M") if c.last_activity_at else "Aucune",
+                c.organization.name if c.organization else "",
+            ])
+        return response
+
 
 # ------------------------------------------------------------------------------
 # 6. Pipeline de Vente & Vue Kanban (DealAdmin)
@@ -370,6 +485,7 @@ class DealAdmin(SoftDeleteAdminMixin, ModelAdmin):
         "expected_close_date",
     )
     list_filter = (
+        DealSegmentFilter,
         ("organization", RelatedDropdownFilter),
         ("stage", ChoicesDropdownFilter),
         ("loss_reason", ChoicesDropdownFilter),
@@ -381,6 +497,7 @@ class DealAdmin(SoftDeleteAdminMixin, ModelAdmin):
     readonly_fields = ("uuid", "created_at", "updated_at", "closed_at", "last_activity_at", "deleted_at")
     inlines = [InteractionInline, TaskInline]
 
+    actions = SoftDeleteAdminMixin.actions + ["export_pipeline_csv_action"]
     actions_list = ["kanban_view_action"]
     actions_row = ["advance_stage_action", "mark_as_won_action"]
 
@@ -488,6 +605,47 @@ class DealAdmin(SoftDeleteAdminMixin, ModelAdmin):
             deal.save()
             messages.success(request, f"Opportunité '{deal.title}' marquée comme Gagnée 🏆 !")
         return redirect("admin:core_deal_changelist")
+
+    @action(description="Exporter le pipeline en CSV 📥", icon="download")
+    def export_pipeline_csv_action(self, request, queryset):
+        import csv
+        from django.http import HttpResponse
+
+        response = HttpResponse(content_type="text/csv; charset=utf-8-sig")
+        response["Content-Disposition"] = 'attachment; filename="pipeline_opportunites_crm.csv"'
+
+        writer = csv.writer(response, delimiter=";")
+        writer.writerow([
+            "UUID",
+            "Titre",
+            "Montant (€)",
+            "Étape",
+            "Probabilité (%)",
+            "Montant Pondéré (€)",
+            "Contact",
+            "Entreprise",
+            "Responsable",
+            "Date Clôture Prévue",
+            "Motif Perte",
+            "Organisation",
+        ])
+
+        for d in queryset.select_related("contact", "company", "owner", "organization"):
+            writer.writerow([
+                str(d.uuid),
+                d.title,
+                f"{d.amount:.2f}",
+                d.get_stage_display(),
+                d.probability,
+                f"{d.weighted_amount:.2f}",
+                d.contact.full_name if d.contact else "",
+                d.company.name if d.company else "",
+                d.owner.username if d.owner else "",
+                d.expected_close_date.strftime("%d/%m/%Y") if d.expected_close_date else "",
+                d.get_loss_reason_display() if d.loss_reason else "",
+                d.organization.name if d.organization else "",
+            ])
+        return response
 
     def kanban_view(self, request):
         """Vue interactive Kanban défilante par étapes de vente."""

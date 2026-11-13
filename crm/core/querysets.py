@@ -44,6 +44,40 @@ class ContactQuerySet(SoftDeleteQuerySet):
             models.Q(last_activity_at__lt=cutoff_date) | models.Q(last_activity_at__isnull=True)
         )
 
+    def inactive_for(self, days: int = 30) -> "ContactQuerySet":
+        """Segment : Prospects & contacts sans interaction depuis au moins X jours (ou jamais contactés)."""
+        cutoff_date = timezone.now() - timedelta(days=days)
+        return self.alive().filter(
+            models.Q(last_activity_at__lt=cutoff_date) | models.Q(last_activity_at__isnull=True)
+        )
+
+    def hot_unconverted(self) -> "ContactQuerySet":
+        """Segment : Prospects très qualifiés (score >= 70 ou QUALIFIED) qui ne sont pas encore devenus clients."""
+        return self.alive().filter(
+            models.Q(lead_score__gte=70) | models.Q(lead_status="QUALIFIED")
+        ).exclude(lead_status="CUSTOMER")
+
+    def without_pending_tasks(self) -> "ContactQuerySet":
+        """Segment : Contacts actifs n'ayant aucun rappel ni tâche en attente."""
+        return self.alive().exclude(
+            tasks__status="PENDING",
+            tasks__deleted_at__isnull=True,
+        )
+
+    def new_in_period(self, days: int = 30) -> "ContactQuerySet":
+        """Segment : Nouveaux contacts créés au cours des X derniers jours."""
+        cutoff_date = timezone.now() - timedelta(days=days)
+        return self.alive().filter(created_at__gte=cutoff_date)
+
+    def dormant_customers(self, days: int = 60) -> "ContactQuerySet":
+        """Segment : Clients existants sans échange depuis plus de X jours (risque de churn)."""
+        cutoff_date = timezone.now() - timedelta(days=days)
+        return self.alive().filter(
+            lead_status="CUSTOMER"
+        ).filter(
+            models.Q(last_activity_at__lt=cutoff_date) | models.Q(last_activity_at__isnull=True)
+        )
+
 
 class CompanyQuerySet(SoftDeleteQuerySet):
     """QuerySet optimisé pour le modèle Company."""
@@ -93,6 +127,44 @@ class DealQuerySet(SoftDeleteQuerySet):
         )
         result = self.active().annotate(weighted=weighted_expr).aggregate(total=Sum("weighted"))["total"]
         return result or Decimal("0.00")
+
+    def won_in_period(self, days: int = 30) -> "DealQuerySet":
+        """Opportunités gagnées au cours des X derniers jours."""
+        cutoff_date = timezone.now() - timedelta(days=days)
+        return self.won().filter(
+            models.Q(closed_at__gte=cutoff_date) | models.Q(updated_at__gte=cutoff_date)
+        )
+
+    def closing_in_period(self, days: int = 30) -> "DealQuerySet":
+        """Opportunités dont la date de clôture prévisionnelle arrive sous X jours."""
+        now = timezone.now().date()
+        cutoff = now + timedelta(days=days)
+        return self.active().filter(expected_close_date__range=[now, cutoff])
+
+    def stalled(self, days: int = 15) -> "DealQuerySet":
+        """Opportunités actives stagnantes sans mise à jour ni interaction depuis X jours."""
+        cutoff_date = timezone.now() - timedelta(days=days)
+        return self.active().filter(
+            models.Q(last_activity_at__lt=cutoff_date) | models.Q(last_activity_at__isnull=True)
+        )
+
+    def conversion_stats(self) -> dict:
+        """Calcule les taux de conversion globaux et par issue commerciale."""
+        total_deals = self.alive().count()
+        won_deals = self.won().count()
+        lost_deals = self.lost().count()
+        closed_deals = won_deals + lost_deals
+
+        win_rate = (won_deals / closed_deals * 100) if closed_deals > 0 else 0.0
+        global_conversion = (won_deals / total_deals * 100) if total_deals > 0 else 0.0
+
+        return {
+            "total_deals": total_deals,
+            "won_deals": won_deals,
+            "lost_deals": lost_deals,
+            "win_rate": round(win_rate, 1),
+            "global_conversion": round(global_conversion, 1),
+        }
 
 
 class InteractionQuerySet(SoftDeleteQuerySet):

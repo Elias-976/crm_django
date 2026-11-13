@@ -25,7 +25,7 @@ SECRET_KEY = 'django-insecure-cu!26&1ay0^wbk$f$afb692=gbuxz8i%y#(qy^9h&j*^@q90_7
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver"]
 
 
 from django.urls import reverse_lazy
@@ -142,20 +142,33 @@ UNFOLD = {
     "SITE_SYMBOL": "speed",
     "SHOW_HISTORY": True,
     "SHOW_VIEW_ON_SITE": False,
+    "DASHBOARD_CALLBACK": "core.reporting.unfold_dashboard_callback",
     "SIDEBAR": {
         "show_search": True,
         "show_all_applications": False,
         "navigation": [
             {
-                "title": "Commercial & Pipeline",
+                "title": "Pilotage & Performance",
                 "separator": True,
                 "collapsible": False,
                 "items": [
+                    {
+                        "title": "Tableau de Bord KPI",
+                        "icon": "analytics",
+                        "link": reverse_lazy("admin:index"),
+                    },
                     {
                         "title": "Pipeline (Vue Kanban)",
                         "icon": "view_kanban",
                         "link": reverse_lazy("admin:core_deal_kanban"),
                     },
+                ],
+            },
+            {
+                "title": "Commercial & Relation Client",
+                "separator": True,
+                "collapsible": False,
+                "items": [
                     {
                         "title": "Opportunités",
                         "icon": "monetization_on",

@@ -12,6 +12,7 @@ from .querysets import (
     ContactQuerySet,
     DealQuerySet,
     InteractionQuerySet,
+    SoftDeleteQuerySet,
     TaskQuerySet,
 )
 
@@ -46,6 +47,8 @@ class SoftDeleteModel(models.Model):
         db_index=True,
         verbose_name="Date de suppression",
     )
+
+    objects = SoftDeleteQuerySet.as_manager()
 
     class Meta:
         abstract = True
