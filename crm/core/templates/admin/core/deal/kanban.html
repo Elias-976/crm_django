@@ -1,0 +1,185 @@
+{% extends 'admin/base.html' %}
+{% load i18n %}
+
+{% block title %}{{ title }} | {{ site_title|default:_('Django site admin') }}{% endblock %}
+
+{% block content %}
+<div class="px-4 py-4 md:px-8 space-y-6">
+
+    <!-- Top KPI Bar & Actions -->
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4 bg-white dark:bg-base-900 border border-base-200 dark:border-base-800 p-5 rounded-2xl shadow-xs">
+        <div>
+            <h1 class="text-2xl font-bold tracking-tight text-base-900 dark:text-white flex items-center gap-2">
+                <span class="material-symbols-outlined text-primary-600 dark:text-primary-400 text-3xl">view_kanban</span>
+                {{ title }}
+            </h1>
+            <p class="text-sm text-base-500 dark:text-base-400 mt-1">
+                Visualisez et faites progresser vos opportunités en temps réel par étape de vente.
+            </p>
+        </div>
+
+        <!-- Metrics & Quick actions -->
+        <div class="flex flex-wrap items-center gap-3">
+            <div class="flex items-center gap-4 bg-base-50 dark:bg-base-800 px-4 py-2 rounded-xl border border-base-200 dark:border-base-700">
+                <div>
+                    <span class="text-xs uppercase font-semibold text-base-500 dark:text-base-400">Total Pipeline</span>
+                    <p class="text-lg font-bold text-base-900 dark:text-white">{{ total_pipeline|floatformat:2 }} €</p>
+                </div>
+                <div class="h-8 w-px bg-base-300 dark:bg-base-700"></div>
+                <div>
+                    <span class="text-xs uppercase font-semibold text-primary-600 dark:text-primary-400">CA Prévisionnel (Pondéré)</span>
+                    <p class="text-lg font-bold text-primary-600 dark:text-primary-400">{{ weighted_pipeline|floatformat:2 }} €</p>
+                </div>
+            </div>
+
+            <a href="{% url 'admin:core_deal_changelist' %}" class="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-base-300 dark:border-base-700 bg-white dark:bg-base-800 hover:bg-base-100 dark:hover:bg-base-700 text-sm font-semibold text-base-800 dark:text-base-200 transition">
+                <span class="material-symbols-outlined text-lg">format_list_bulleted</span>
+                Vue Tableau
+            </a>
+
+            <a href="{% url 'admin:core_deal_add' %}" class="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-primary-600 hover:bg-primary-500 text-white text-sm font-semibold shadow-xs transition">
+                <span class="material-symbols-outlined text-lg">add</span>
+                Nouvelle Opportunité
+            </a>
+        </div>
+    </div>
+
+    <!-- Filter by Organization if Multi-tenant -->
+    {% if organizations|length > 1 %}
+    <div class="flex items-center gap-3 bg-base-50 dark:bg-base-900 px-4 py-3 rounded-xl border border-base-200 dark:border-base-800 text-sm">
+        <span class="font-semibold text-base-700 dark:text-base-300 flex items-center gap-1">
+            <span class="material-symbols-outlined text-base">domain</span> Espace Client / Organisation :
+        </span>
+        <a href="{% url 'admin:core_deal_kanban' %}" class="px-3 py-1 rounded-lg font-medium transition {% if not selected_org %}bg-primary-600 text-white{% else %}text-base-600 dark:text-base-400 hover:bg-base-200 dark:hover:bg-base-800{% endif %}">
+            Toutes
+        </a>
+        {% for org in organizations %}
+        <a href="{% url 'admin:core_deal_kanban' %}?org={{ org.id }}" class="px-3 py-1 rounded-lg font-medium transition {% if selected_org == org.id|stringformat:'s' %}bg-primary-600 text-white{% else %}text-base-600 dark:text-base-400 hover:bg-base-200 dark:hover:bg-base-800{% endif %}">
+            {{ org.name }}
+        </a>
+        {% endfor %}
+    </div>
+    {% endif %}
+
+    <!-- Kanban Columns Container (Horizontal Scrollable) -->
+    <div class="flex gap-5 overflow-x-auto pb-8 pt-1 items-start snap-x snap-mandatory">
+        {% for stage in stages %}
+        <div class="w-80 shrink-0 bg-base-100 dark:bg-base-900 border border-base-200 dark:border-base-800 rounded-2xl flex flex-col max-h-[82vh] snap-start shadow-xs">
+            
+            <!-- Column Header -->
+            <div class="p-4 border-b border-base-200 dark:border-base-800 bg-base-50/80 dark:bg-base-850/80 rounded-t-2xl">
+                <div class="flex items-center justify-between">
+                    <span class="font-bold text-sm tracking-wide text-base-900 dark:text-white uppercase flex items-center gap-1.5">
+                        {% if stage.code == 'LEAD' %}🔍{% elif stage.code == 'QUALIFIED' %}🎯{% elif stage.code == 'PROPOSAL' %}📑{% elif stage.code == 'NEGOTIATION' %}🤝{% elif stage.code == 'WON' %}🏆{% else %}❌{% endif %}
+                        {{ stage.label }}
+                    </span>
+                    <span class="inline-flex items-center justify-center px-2 py-0.5 rounded-full text-xs font-bold {% if stage.code == 'WON' %}bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300{% elif stage.code == 'LOST' %}bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300{% else %}bg-base-200 dark:bg-base-800 text-base-700 dark:text-base-300{% endif %}">
+                        {{ stage.count }}
+                    </span>
+                </div>
+                <div class="mt-2 flex items-baseline justify-between text-xs text-base-500 dark:text-base-400">
+                    <span>Total étape</span>
+                    <span class="font-bold text-base-900 dark:text-base-200">{{ stage.total_amount|floatformat:2 }} €</span>
+                </div>
+            </div>
+
+            <!-- Cards List in Column -->
+            <div class="p-3 space-y-3 overflow-y-auto flex-1">
+                {% for deal in stage.deals %}
+                <div class="bg-white dark:bg-base-800 border border-base-200 dark:border-base-700/80 hover:border-primary-500 dark:hover:border-primary-500 p-4 rounded-xl shadow-xs transition duration-150 hover:shadow-md group">
+                    
+                    <!-- Card Title & Amount -->
+                    <div class="flex items-start justify-between gap-2">
+                        <a href="{% url 'admin:core_deal_change' deal.id %}" class="font-semibold text-sm text-base-900 dark:text-white hover:text-primary-600 dark:hover:text-primary-400 line-clamp-2">
+                            {{ deal.title }}
+                        </a>
+                        <span class="shrink-0 text-sm font-extrabold text-base-900 dark:text-emerald-400">
+                            {{ deal.amount|floatformat:0 }} €
+                        </span>
+                    </div>
+
+                    <!-- Contact & Company -->
+                    <div class="mt-2.5 space-y-1 text-xs text-base-600 dark:text-base-400">
+                        {% if deal.contact %}
+                        <div class="flex items-center gap-1.5 truncate">
+                            <span class="material-symbols-outlined text-sm text-base-400">person</span>
+                            <a href="{% url 'admin:core_contact_change' deal.contact.id %}" class="hover:underline truncate font-medium text-base-700 dark:text-base-300">
+                                {{ deal.contact.full_name }}
+                            </a>
+                        </div>
+                        {% endif %}
+                        {% if deal.company %}
+                        <div class="flex items-center gap-1.5 truncate">
+                            <span class="material-symbols-outlined text-sm text-base-400">business</span>
+                            <span class="truncate">{{ deal.company.name }}</span>
+                        </div>
+                        {% endif %}
+                    </div>
+
+                    <!-- Date & Inactivity Alert -->
+                    <div class="mt-3 pt-2.5 border-t border-base-100 dark:border-base-700/60 flex items-center justify-between text-xs">
+                        <div class="flex items-center gap-1 text-base-500 dark:text-base-400">
+                            <span class="material-symbols-outlined text-xs">schedule</span>
+                            {% if deal.last_activity_at %}
+                                <span>{{ deal.last_activity_at|date:"d/m/Y" }}</span>
+                            {% else %}
+                                <span class="text-amber-600 dark:text-amber-400 font-semibold">Aucune activité</span>
+                            {% endif %}
+                        </div>
+
+                        {% if deal.stage == 'LOST' and deal.loss_reason %}
+                            <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300">
+                                {{ deal.get_loss_reason_display }}
+                            </span>
+                        {% elif deal.probability %}
+                            <span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-base-100 dark:bg-base-700 text-base-600 dark:text-base-300">
+                                {{ deal.probability }}%
+                            </span>
+                        {% endif %}
+                    </div>
+
+                    <!-- Stage Transition Quick Controls -->
+                    <div class="mt-3 pt-2 flex items-center justify-between border-t border-base-100 dark:border-base-700/40 text-xs">
+                        {% if stage.code != 'WON' and stage.code != 'LOST' %}
+                        <form method="post" action="{% url 'admin:core_deal_move_stage' deal.id %}">
+                            {% csrf_token %}
+                            <input type="hidden" name="action" value="advance">
+                            <button type="submit" class="inline-flex items-center gap-1 text-primary-600 dark:text-primary-400 hover:text-primary-700 font-semibold transition">
+                                Étape suivante <span class="material-symbols-outlined text-xs">arrow_forward</span>
+                            </button>
+                        </form>
+
+                        <div class="flex items-center gap-1">
+                            <form method="post" action="{% url 'admin:core_deal_move_stage' deal.id %}">
+                                {% csrf_token %}
+                                <input type="hidden" name="action" value="win">
+                                <button type="submit" title="Marquer Gagné" class="p-1 rounded hover:bg-emerald-50 dark:hover:bg-emerald-950 text-emerald-600 transition">
+                                    <span class="material-symbols-outlined text-sm">trophy</span>
+                                </button>
+                            </form>
+                            <a href="{% url 'admin:core_deal_change' deal.id %}#loss_reason" title="Marquer Perdu (Motif requis)" class="p-1 rounded hover:bg-rose-50 dark:hover:bg-rose-950 text-rose-500 transition">
+                                <span class="material-symbols-outlined text-sm">cancel</span>
+                            </a>
+                        </div>
+                        {% else %}
+                        <a href="{% url 'admin:core_deal_change' deal.id %}" class="text-base-400 hover:text-base-600 dark:hover:text-base-200 transition">
+                            Voir le détail
+                        </a>
+                        {% endif %}
+                    </div>
+
+                </div>
+                {% empty %}
+                <div class="p-6 text-center text-xs text-base-400 dark:text-base-500 border border-dashed border-base-200 dark:border-base-800 rounded-xl">
+                    Aucune opportunité à cette étape
+                </div>
+                {% endfor %}
+            </div>
+
+        </div>
+        {% endfor %}
+    </div>
+
+</div>
+{% endblock %}
+

@@ -28,9 +28,15 @@ DEBUG = True
 ALLOWED_HOSTS = []
 
 
+from django.urls import reverse_lazy
+
 # Application definition
 
 INSTALLED_APPS = [
+    'unfold',
+    'unfold.contrib.filters',
+    'unfold.contrib.forms',
+    'unfold.contrib.inlines',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -55,7 +61,7 @@ ROOT_URLCONF = 'crm.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -124,5 +130,87 @@ STATIC_URL = 'static/'
 MAILERS = {
     'default': {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
+    },
+}
+
+# Django Unfold Configuration
+UNFOLD = {
+    "SITE_TITLE": "CRM Relationnel",
+    "SITE_HEADER": "CRM Indépendants & TPE",
+    "SITE_SUBHEADER": "Gestion commerciale & Pipeline",
+    "SITE_SYMBOL": "speed",
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": False,
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": False,
+        "navigation": [
+            {
+                "title": "Commercial & Pipeline",
+                "separator": True,
+                "collapsible": False,
+                "items": [
+                    {
+                        "title": "Pipeline (Vue Kanban)",
+                        "icon": "view_kanban",
+                        "link": reverse_lazy("admin:core_deal_kanban"),
+                    },
+                    {
+                        "title": "Opportunités",
+                        "icon": "monetization_on",
+                        "link": reverse_lazy("admin:core_deal_changelist"),
+                    },
+                    {
+                        "title": "Contacts & Prospects",
+                        "icon": "people",
+                        "link": reverse_lazy("admin:core_contact_changelist"),
+                    },
+                    {
+                        "title": "Entreprises",
+                        "icon": "business",
+                        "link": reverse_lazy("admin:core_company_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Productivité & Suivi",
+                "separator": True,
+                "collapsible": False,
+                "items": [
+                    {
+                        "title": "Tâches & Rappels",
+                        "icon": "task_alt",
+                        "link": reverse_lazy("admin:core_task_changelist"),
+                    },
+                    {
+                        "title": "Timeline d'Interactions",
+                        "icon": "forum",
+                        "link": reverse_lazy("admin:core_interaction_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": "Administration & Tenants",
+                "separator": True,
+                "collapsible": True,
+                "items": [
+                    {
+                        "title": "Organisations",
+                        "icon": "apartment",
+                        "link": reverse_lazy("admin:core_organization_changelist"),
+                    },
+                    {
+                        "title": "Profils Utilisateurs",
+                        "icon": "badge",
+                        "link": reverse_lazy("admin:core_userprofile_changelist"),
+                    },
+                    {
+                        "title": "Comptes Utilisateurs",
+                        "icon": "manage_accounts",
+                        "link": reverse_lazy("admin:auth_user_changelist"),
+                    },
+                ],
+            },
+        ],
     },
 }

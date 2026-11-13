@@ -390,3 +390,106 @@ class CoreModelTestCase(TestCase):
         with self.assertNumQueries(0):
             _ = contacts[0].company.name
             _ = contacts[0].owner.username
+
+    def test_kanban_view_rendering(self):
+        admin_user = User.objects.create_superuser(
+            username="adminuser",
+            email="admin@example.com",
+            password="adminpassword123",
+        )
+        self.client.force_login(admin_user)
+
+        deal_lead = Deal.objects.create(
+            organization=self.organization,
+            title="Projet Alpha",
+            amount=Decimal("12000.00"),
+            stage=DealStage.LEAD,
+            contact=self.contact,
+            company=self.company,
+        )
+        deal_won = Deal.objects.create(
+            organization=self.organization,
+            title="Projet Gagné",
+            amount=Decimal("8000.00"),
+            stage=DealStage.WON,
+            contact=self.contact,
+            company=self.company,
+            closed_at=timezone.now(),
+        )
+
+        response = self.client.get("/admin/core/deal/kanban/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "admin/core/deal/kanban.html")
+
+        # Vérification des colonnes Kanban dans le contexte
+        stages_context = response.context["stages"]
+        lead_stage = next(s for s in stages_context if s["code"] == DealStage.LEAD)
+        won_stage = next(s for s in stages_context if s["code"] == DealStage.WON)
+
+        self.assertIn(deal_lead, lead_stage["deals"])
+        self.assertEqual(lead_stage["count"], 1)
+        self.assertIn(deal_won, won_stage["deals"])
+        self.assertEqual(won_stage["count"], 1)
+
+    def test_kanban_move_stage_view(self):
+        admin_user = User.objects.create_superuser(
+            username="adminuser2",
+            email="admin2@example.com",
+            password="adminpassword123",
+        )
+        self.client.force_login(admin_user)
+
+        deal = Deal.objects.create(
+            organization=self.organization,
+            title="Opportunité Transition",
+            amount=Decimal("15000.00"),
+            stage=DealStage.LEAD,
+            contact=self.contact,
+            company=self.company,
+        )
+
+        # 1. Avancer d'étape (LEAD -> QUALIFIED)
+        response = self.client.post(
+            f"/admin/core/deal/{deal.id}/move-stage/",
+            {"action": "advance"},
+        )
+        self.assertEqual(response.status_code, 302)
+        deal.refresh_from_db()
+        self.assertEqual(deal.stage, DealStage.QUALIFIED)
+
+        # 2. Marquer directement comme Gagné
+        response = self.client.post(
+            f"/admin/core/deal/{deal.id}/move-stage/",
+            {"action": "win"},
+        )
+        self.assertEqual(response.status_code, 302)
+        deal.refresh_from_db()
+        self.assertEqual(deal.stage, DealStage.WON)
+        self.assertIsNotNone(deal.closed_at)
+
+    def test_lead_scoring_and_unfold_displays(self):
+        from .admin import ContactAdmin
+        from django.contrib.admin.sites import AdminSite
+
+        site = AdminSite()
+        contact_admin = ContactAdmin(Contact, site)
+
+        # 1. Test du label de scoring visuel
+        score_tag, score_text = contact_admin.display_lead_score(self.contact)
+        self.assertEqual(score_tag, "HOT")
+        self.assertIn("🔥 85 (Chaud)", score_text)
+
+        # 2. Test du statut
+        status_code, status_label = contact_admin.display_lead_status(self.contact)
+        self.assertEqual(status_code, LeadStatus.QUALIFIED)
+
+        # 3. Test de recalcul du score
+        cold_contact = Contact.objects.create(
+            organization=self.organization,
+            first_name="Bob",
+            last_name="Cold",
+            lead_score=0,
+        )
+        cold_tag, cold_text = contact_admin.display_lead_score(cold_contact)
+        self.assertEqual(cold_tag, "COLD")
+        self.assertIn("❄️ 0 (Froid)", cold_text)
