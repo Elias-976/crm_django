@@ -16,9 +16,11 @@ from .models import (
     InteractionType,
     LeadStatus,
     LossReason,
+    Organization,
     Task,
     TaskPriority,
     TaskStatus,
+    UserProfile,
 )
 
 User = get_user_model()
@@ -26,12 +28,22 @@ User = get_user_model()
 
 class CoreModelTestCase(TestCase):
     def setUp(self):
+        self.organization = Organization.objects.create(
+            name="SaaS Workspace Alpha",
+            slug="workspace-alpha",
+        )
         self.user = User.objects.create_user(
             username="commercial1",
             email="commercial1@example.com",
             password="securepassword123",
         )
+        self.user_profile = UserProfile.objects.create(
+            user=self.user,
+            organization=self.organization,
+            role="COMMERCIAL",
+        )
         self.company = Company.objects.create(
+            organization=self.organization,
             name="Acme Corp",
             domain="acme.com",
             industry="Technologie",
@@ -39,6 +51,7 @@ class CoreModelTestCase(TestCase):
             custom_fields={"taille_parc": 45, "type_licence": "Enterprise"},
         )
         self.contact = Contact.objects.create(
+            organization=self.organization,
             first_name="Jean",
             last_name="Dupont",
             email="jean.dupont@acme.com",
@@ -51,8 +64,14 @@ class CoreModelTestCase(TestCase):
             custom_fields={"canal_acquisition": "LinkedIn"},
         )
 
+    def test_organization_and_user_profile(self):
+        self.assertEqual(str(self.organization), "SaaS Workspace Alpha")
+        self.assertEqual(str(self.user_profile), f"{self.user} (SaaS Workspace Alpha)")
+        self.assertEqual(self.user.profile.organization, self.organization)
+
     def test_company_creation_and_custom_fields(self):
         self.assertEqual(str(self.company), "Acme Corp")
+        self.assertEqual(self.company.organization, self.organization)
         self.assertEqual(self.company.custom_fields.get("taille_parc"), 45)
         self.assertEqual(self.company.custom_fields.get("type_licence"), "Enterprise")
 
@@ -60,9 +79,10 @@ class CoreModelTestCase(TestCase):
         self.assertEqual(self.contact.full_name, "Jean Dupont")
         self.assertEqual(str(self.contact), "Jean Dupont (Acme Corp)")
 
-    def test_contact_email_uniqueness_and_null_handling(self):
-        # 1. Duplication exacte -> doit échouer
+    def test_contact_email_uniqueness_per_organization(self):
+        # 1. Duplication exacte au sein de la MÊME organisation -> doit échouer
         duplicate_contact = Contact(
+            organization=self.organization,
             first_name="Autre",
             last_name="Personne",
             email="jean.dupont@acme.com",
@@ -70,8 +90,9 @@ class CoreModelTestCase(TestCase):
         with self.assertRaises(ValidationError):
             duplicate_contact.save()
 
-        # 2. Insensibilité à la casse ("JEAN.DUPONT@ACME.COM") -> doit échouer
+        # 2. Insensibilité à la casse au sein de la même organisation -> doit échouer
         case_duplicate = Contact(
+            organization=self.organization,
             first_name="Autre",
             last_name="Personne",
             email="  JEAN.DUPONT@acme.COM  ",
@@ -79,22 +100,91 @@ class CoreModelTestCase(TestCase):
         with self.assertRaises(ValidationError):
             case_duplicate.save()
 
-        # 3. Plusieurs contacts sans email (None ou "") -> autorisés sans conflit d'unicité
-        c1 = Contact.objects.create(first_name="Sans", last_name="Email1", email="")
-        c2 = Contact.objects.create(first_name="Sans", last_name="Email2", email=None)
+        # 3. Même e-mail dans une AUTRE organisation (isolation SaaS) -> doit réussir !
+        org_beta = Organization.objects.create(name="Tenant Beta", slug="tenant-beta")
+        contact_other_tenant = Contact.objects.create(
+            organization=org_beta,
+            first_name="Jean",
+            last_name="Dupont",
+            email="jean.dupont@acme.com",
+        )
+        self.assertEqual(contact_other_tenant.email, "jean.dupont@acme.com")
+        self.assertNotEqual(contact_other_tenant.organization, self.organization)
+
+        # 4. Plusieurs contacts sans email (None ou "") -> autorisés sans collision
+        c1 = Contact.objects.create(organization=self.organization, first_name="Sans", last_name="Email1", email="")
+        c2 = Contact.objects.create(organization=self.organization, first_name="Sans", last_name="Email2", email=None)
         self.assertIsNone(c1.email)
         self.assertIsNone(c2.email)
+
+    def test_cross_organization_integrity_validation(self):
+        org_beta = Organization.objects.create(name="Tenant Beta", slug="tenant-beta")
+        company_beta = Company.objects.create(organization=org_beta, name="Beta Corp")
+        contact_beta = Contact.objects.create(organization=org_beta, first_name="Paul", last_name="Beta")
+        deal_beta = Deal.objects.create(organization=org_beta, title="Deal Beta")
+
+        # Contact: rattaché à une entreprise d'une autre organisation -> rejeté
+        invalid_contact = Contact(
+            organization=self.organization,
+            first_name="Test",
+            last_name="Intrus",
+            company=company_beta,
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            invalid_contact.save()
+        self.assertIn("company", ctx.exception.message_dict)
+
+        # Deal: rattaché à une entreprise ou un contact d'une autre organisation -> rejeté
+        invalid_deal = Deal(
+            organization=self.organization,
+            title="Deal Intrus",
+            company=company_beta,
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            invalid_deal.save()
+        self.assertIn("company", ctx.exception.message_dict)
+
+        invalid_deal_contact = Deal(
+            organization=self.organization,
+            title="Deal Intrus 2",
+            contact=contact_beta,
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            invalid_deal_contact.save()
+        self.assertIn("contact", ctx.exception.message_dict)
+
+        # Interaction: rattachée à un contact d'une autre organisation -> rejeté
+        invalid_interaction = Interaction(
+            organization=self.organization,
+            type=InteractionType.NOTE,
+            title="Note cross-tenant",
+            contact=contact_beta,
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            invalid_interaction.save()
+        self.assertIn("contact", ctx.exception.message_dict)
+
+        # Task: rattachée à un deal d'une autre organisation -> rejeté
+        invalid_task = Task(
+            organization=self.organization,
+            title="Tâche cross-tenant",
+            due_date=timezone.now() + timedelta(days=1),
+            deal=deal_beta,
+        )
+        with self.assertRaises(ValidationError) as ctx:
+            invalid_task.save()
+        self.assertIn("deal", ctx.exception.message_dict)
 
     def test_protected_deletion_on_contact_and_company(self):
         # Interaction rattachée au contact et à l'entreprise
         Interaction.objects.create(
+            organization=self.organization,
             type=InteractionType.NOTE,
             title="Note stratégique",
             contact=self.contact,
             company=self.company,
         )
 
-        # La suppression directe du contact ou de l'entreprise doit être bloquée (PROTECT)
         with self.assertRaises(models.ProtectedError):
             self.contact.delete()
 
@@ -102,9 +192,10 @@ class CoreModelTestCase(TestCase):
             self.company.delete()
 
         # Idem pour une tâche
-        new_company = Company.objects.create(name="Beta SAS")
-        new_contact = Contact.objects.create(first_name="Paul", last_name="Roc", company=new_company)
+        new_company = Company.objects.create(organization=self.organization, name="Beta SAS")
+        new_contact = Contact.objects.create(organization=self.organization, first_name="Paul", last_name="Roc", company=new_company)
         Task.objects.create(
+            organization=self.organization,
             title="Relancer devis",
             due_date=timezone.now() + timedelta(days=2),
             contact=new_contact,
@@ -118,8 +209,8 @@ class CoreModelTestCase(TestCase):
             new_company.delete()
 
     def test_deal_validation_requires_loss_reason_when_lost(self):
-        # Création directe via save() sans motif de perte -> rejeté
         deal = Deal(
+            organization=self.organization,
             title="Contrat Cloud Acme",
             amount=Decimal("15000.00"),
             stage=DealStage.LOST,
@@ -131,7 +222,6 @@ class CoreModelTestCase(TestCase):
             deal.save()
         self.assertIn("loss_reason", ctx.exception.message_dict)
 
-        # Avec motif de perte -> validation OK
         deal.loss_reason = LossReason.PRICE
         deal.loss_notes = "Budget gelé pour l'année en cours."
         deal.save()
@@ -140,6 +230,7 @@ class CoreModelTestCase(TestCase):
 
     def test_deal_weighted_amount_and_pipeline_aggregation(self):
         deal1 = Deal.objects.create(
+            organization=self.organization,
             title="Projet Audit",
             amount=Decimal("10000.00"),
             stage=DealStage.PROPOSAL,
@@ -149,6 +240,7 @@ class CoreModelTestCase(TestCase):
             owner=self.user,
         )
         deal2 = Deal.objects.create(
+            organization=self.organization,
             title="Formation Dev",
             amount=Decimal("5000.00"),
             stage=DealStage.NEGOTIATION,
@@ -167,6 +259,7 @@ class CoreModelTestCase(TestCase):
 
     def test_interaction_validation_requires_target_entity(self):
         interaction = Interaction(
+            organization=self.organization,
             type=InteractionType.CALL,
             title="Appel de qualification sans cible",
         )
@@ -178,7 +271,8 @@ class CoreModelTestCase(TestCase):
         self.assertIsNone(self.company.last_activity_at)
 
         now = timezone.now()
-        interaction = Interaction.objects.create(
+        Interaction.objects.create(
+            organization=self.organization,
             type=InteractionType.CALL,
             direction=InteractionDirection.OUTBOUND,
             title="Point de cadrage",
@@ -200,13 +294,13 @@ class CoreModelTestCase(TestCase):
         )
 
     def test_bulk_create_and_sync_interactions(self):
-        """Teste l'insertion en masse et la synchronisation groupée sans N+1 requêtes."""
         now = timezone.now()
         t1 = now - timedelta(hours=2)
-        t2 = now  # plus récente
+        t2 = now
 
         interactions = [
             Interaction(
+                organization=self.organization,
                 type=InteractionType.NOTE,
                 title="Premier contact importé",
                 contact=self.contact,
@@ -214,6 +308,7 @@ class CoreModelTestCase(TestCase):
                 occurred_at=t1,
             ),
             Interaction(
+                organization=self.organization,
                 type=InteractionType.CALL,
                 title="Second appel importé",
                 contact=self.contact,
@@ -227,7 +322,6 @@ class CoreModelTestCase(TestCase):
         self.contact.refresh_from_db()
         self.company.refresh_from_db()
 
-        # Doit être aligné sur la date la plus récente t2
         self.assertEqual(
             self.contact.last_activity_at.strftime("%Y-%m-%d %H:%M:%S"),
             t2.strftime("%Y-%m-%d %H:%M:%S"),
@@ -237,6 +331,7 @@ class CoreModelTestCase(TestCase):
         t_old = now - timedelta(days=10)
         old_interaction = [
             Interaction(
+                organization=self.organization,
                 type=InteractionType.EMAIL,
                 title="Ancien email importé",
                 contact=self.contact,
@@ -262,6 +357,7 @@ class CoreModelTestCase(TestCase):
         self.assertNotIn(self.contact, Contact.objects.needs_follow_up(days=7))
 
         old_contact = Contact.objects.create(
+            organization=self.organization,
             first_name="Alice",
             last_name="Martin",
             last_activity_at=timezone.now() - timedelta(days=45),
@@ -272,6 +368,7 @@ class CoreModelTestCase(TestCase):
     def test_task_lifecycle_and_due_date_filters(self):
         past_date = timezone.now() - timedelta(days=1)
         overdue_task = Task.objects.create(
+            organization=self.organization,
             title="Rappeler pour signer devis",
             due_date=past_date,
             priority=TaskPriority.HIGH,

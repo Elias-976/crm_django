@@ -30,7 +30,78 @@ class TimeStampedModel(models.Model):
         abstract = True
 
 
-class Company(TimeStampedModel):
+class Organization(TimeStampedModel):
+    """Représente un espace client / tenant isolé dans le CRM SaaS."""
+
+    name = models.CharField(
+        max_length=255,
+        db_index=True,
+        verbose_name="Nom de l'organisation",
+    )
+    slug = models.SlugField(
+        max_length=255,
+        unique=True,
+        verbose_name="Identifiant URL / Slug",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name="Actif",
+    )
+
+    class Meta:
+        verbose_name = "Organisation"
+        verbose_name_plural = "Organisations"
+        ordering = ["name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class UserProfile(TimeStampedModel):
+    """Profil utilisateur liant AUTH_USER_MODEL à une Organisation (Tenant)."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="profile",
+        verbose_name="Utilisateur",
+    )
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name="user_profiles",
+        verbose_name="Organisation",
+    )
+    role = models.CharField(
+        max_length=50,
+        default="MEMBER",
+        verbose_name="Rôle",
+    )
+
+    class Meta:
+        verbose_name = "Profil utilisateur"
+        verbose_name_plural = "Profils utilisateurs"
+
+    def __str__(self) -> str:
+        return f"{self.user} ({self.organization.name})"
+
+
+class TenantModel(TimeStampedModel):
+    """Classe de base abstraite assurant le cloisonnement multi-tenant des données."""
+
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        db_index=True,
+        related_name="%(class)s_set",
+        verbose_name="Organisation",
+    )
+
+    class Meta:
+        abstract = True
+
+
+class Company(TenantModel):
     """Représente une organisation ou un compte professionnel."""
 
     name = models.CharField(
@@ -102,6 +173,11 @@ class Company(TimeStampedModel):
         verbose_name_plural = "Entreprises"
         ordering = ["name"]
 
+    def save(self, *args, **kwargs):
+        if "update_fields" not in kwargs:
+            self.full_clean()
+        super().save(*args, **kwargs)
+
     def __str__(self) -> str:
         return self.name
 
@@ -114,7 +190,7 @@ class LeadStatus(models.TextChoices):
     CUSTOMER = "CUSTOMER", "Client"
 
 
-class Contact(TimeStampedModel):
+class Contact(TenantModel):
     """Représente une personne physique (prospect, client, partenaire)."""
 
     first_name = models.CharField(
@@ -130,7 +206,6 @@ class Contact(TimeStampedModel):
     email = models.EmailField(
         blank=True,
         null=True,
-        unique=True,
         db_index=True,
         verbose_name="E-mail",
     )
@@ -196,18 +271,32 @@ class Contact(TimeStampedModel):
             models.Index(fields=["last_name", "first_name"]),
             models.Index(fields=["lead_status", "lead_score"]),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["organization", "email"],
+                condition=models.Q(email__isnull=False),
+                name="unique_contact_email_per_organization",
+            ),
+        ]
 
-    def clean(self):
-        super().clean()
-        if self.email:
+    def clean_fields(self, exclude=None):
+        if self.email and (exclude is None or "email" not in exclude):
             cleaned_email = self.email.strip().lower()
             self.email = cleaned_email if cleaned_email else None
         else:
             self.email = None
+        super().clean_fields(exclude=exclude)
+
+    def clean(self):
+        super().clean()
+        if self.company_id and self.company.organization_id != self.organization_id:
+            raise ValidationError({
+                "company": "L'entreprise associée doit appartenir à la même organisation."
+            })
 
     def save(self, *args, **kwargs):
-        self.clean()
-        self.full_clean()
+        if "update_fields" not in kwargs:
+            self.full_clean()
         super().save(*args, **kwargs)
 
     @property
@@ -239,7 +328,7 @@ class LossReason(models.TextChoices):
     OTHER = "OTHER", "Autre motif"
 
 
-class Deal(TimeStampedModel):
+class Deal(TenantModel):
     """Représente une transaction ou opportunité commerciale dans le pipeline."""
 
     title = models.CharField(
@@ -337,6 +426,14 @@ class Deal(TimeStampedModel):
 
     def clean(self):
         super().clean()
+        if self.company_id and self.company.organization_id != self.organization_id:
+            raise ValidationError({
+                "company": "L'entreprise associée doit appartenir à la même organisation."
+            })
+        if self.contact_id and self.contact.organization_id != self.organization_id:
+            raise ValidationError({
+                "contact": "Le contact associé doit appartenir à la même organisation."
+            })
         if self.stage == DealStage.LOST and not self.loss_reason:
             raise ValidationError({
                 "loss_reason": "Le motif de perte est obligatoire lorsqu'une opportunité est marquée comme Perdue."
@@ -347,8 +444,8 @@ class Deal(TimeStampedModel):
             self.closed_at = None
 
     def save(self, *args, **kwargs):
-        self.clean()
-        self.full_clean()
+        if "update_fields" not in kwargs:
+            self.full_clean()
         super().save(*args, **kwargs)
 
     @property
@@ -375,7 +472,7 @@ class InteractionDirection(models.TextChoices):
     NOT_APPLICABLE = "NA", "Non applicable"
 
 
-class Interaction(TimeStampedModel):
+class Interaction(TenantModel):
     """Événement ou interaction consigné dans la timeline chronologique."""
 
     type = models.CharField(
@@ -466,10 +563,22 @@ class Interaction(TimeStampedModel):
             raise ValidationError(
                 "Une interaction doit être rattachée à au moins un Contact, une Entreprise ou une Opportunité."
             )
+        if self.contact_id and self.contact.organization_id != self.organization_id:
+            raise ValidationError({
+                "contact": "Le contact associé doit appartenir à la même organisation."
+            })
+        if self.company_id and self.company.organization_id != self.organization_id:
+            raise ValidationError({
+                "company": "L'entreprise associée doit appartenir à la même organisation."
+            })
+        if self.deal_id and self.deal.organization_id != self.organization_id:
+            raise ValidationError({
+                "deal": "L'opportunité associée doit appartenir à la même organisation."
+            })
 
     def save(self, *args, **kwargs):
-        self.clean()
-        self.full_clean()
+        if "update_fields" not in kwargs:
+            self.full_clean()
         super().save(*args, **kwargs)
 
     def _sync_last_activity(self):
@@ -500,7 +609,7 @@ class TaskStatus(models.TextChoices):
     CANCELLED = "CANCELLED", "Annulée"
 
 
-class Task(TimeStampedModel):
+class Task(TenantModel):
     """Tâche ou rappel de relance commerciale lié aux fiches clients."""
 
     title = models.CharField(
@@ -590,10 +699,22 @@ class Task(TimeStampedModel):
             raise ValidationError(
                 "Une tâche doit être rattachée à au moins un Contact, une Entreprise ou une Opportunité."
             )
+        if self.contact_id and self.contact.organization_id != self.organization_id:
+            raise ValidationError({
+                "contact": "Le contact associé doit appartenir à la même organisation."
+            })
+        if self.company_id and self.company.organization_id != self.organization_id:
+            raise ValidationError({
+                "company": "L'entreprise associée doit appartenir à la même organisation."
+            })
+        if self.deal_id and self.deal.organization_id != self.organization_id:
+            raise ValidationError({
+                "deal": "L'opportunité associée doit appartenir à la même organisation."
+            })
 
     def save(self, *args, **kwargs):
-        self.clean()
-        self.full_clean()
+        if "update_fields" not in kwargs:
+            self.full_clean()
         super().save(*args, **kwargs)
 
     def mark_completed(self):

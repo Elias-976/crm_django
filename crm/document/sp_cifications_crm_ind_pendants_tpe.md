@@ -44,8 +44,6 @@ Tu es un **Lead Developer Fullstack Senior (Django / PostgreSQL / Astro)** spéc
 
 ## 1. Vision & Stack Technique
 
-* **Objectif :** Un CRM ultra-rapide centré sur la relation humaine et la relance commerciale pour freelances et TPE. L'utilisateur doit savoir *qui relancer aujourd'hui* en moins de 10 secondes.
+* **Objectif :** Un CRM SaaS ultra-rapide centré sur la relation humaine et la relance commerciale pour freelances et TPE. L'utilisateur doit savoir *qui relancer aujourd'hui* en moins de 10 secondes.
 
 * **Backend & Back-office :** Django + **Django Unfold** + **PostgreSQL**.
-
-* **Frontend Client :** **Astro** (architecture orientée performance).
