@@ -26,7 +26,8 @@ YellowBox CRM
 5. Architecture technique et ergonomie (L'effet "Vibecoding / Moderne")
 Interface fluide et réactive (type SPA / Tailwind) : Une navigation sans rechargement de page, inspirée des standards actuels (comme l'interface de Django Unfold ou de composants React modernes) pour garantir une saisie ultra-rapide sans friction.
 Gestion des rôles (RBAC) : Séparer les droits entre les commerciaux (qui gèrent leur portefeuille) et les administrateurs.
-Journal d'audit (Audit Logs) : Garder une trace des modifications sensibles sur les fiches pour garantir la traçabilité des données.
+Journal d'audit (Audit Logs) : Garder une trace des modifications sensibles
+et respecter le principe de la multi-tenant(deux profils differentes exemple des independant ou TPE ne peuvent avoir acces aux memes données.) comme il faut sur les fiches pour garantir l'unicité des utilisateurs et la traçabilité des données.
 
 ## 🤖 RÔLE & RÈGLES STRICTES POUR L'IA (À LIRE EN PREMIER)
 

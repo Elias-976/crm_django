@@ -7,6 +7,8 @@ from django.test import TestCase
 from django.utils import timezone
 
 from .models import (
+    AuditAction,
+    AuditLog,
     Company,
     Contact,
     Deal,
@@ -1015,3 +1017,180 @@ class CoreModelTestCase(TestCase):
         self.assertIn("Entonnoir de Conversion Commercial", content)
         self.assertIn("Segmentation Avancée & Actions Ciblées", content)
         self.assertIn("Qui relancer aujourd'hui", content)
+
+    def test_audit_log_creation_and_tracking(self):
+        from .audit import log_audit_event
+
+        deal = Deal.objects.create(
+            organization=self.organization,
+            title="Opportunité Audit Test",
+            amount=Decimal("15000.00"),
+            stage=DealStage.LEAD,
+            contact=self.contact,
+            owner=self.user,
+        )
+
+        # 1. Enregistrement d'un événement CREATE
+        log_create = log_audit_event(
+            instance=deal,
+            action=AuditAction.CREATE,
+            user=self.user,
+            changes={"info": "Création du deal"},
+            ip_address="127.0.0.1",
+        )
+        self.assertIsNotNone(log_create)
+        self.assertEqual(log_create.action, AuditAction.CREATE)
+        self.assertEqual(log_create.model_name, "Deal")
+        self.assertEqual(log_create.deal, deal)
+        self.assertEqual(log_create.user, self.user)
+        self.assertEqual(log_create.ip_address, "127.0.0.1")
+
+        # 2. Enregistrement d'une modification sensible UPDATE
+        diff = {
+            "stage": {"old": "Prospect identifié", "new": "Démo / Offre"},
+            "amount": {"old": "15000.00", "new": "20000.00"},
+        }
+        log_update = log_audit_event(
+            instance=deal,
+            action=AuditAction.UPDATE,
+            user=self.user,
+            changes=diff,
+            ip_address="192.168.1.10",
+        )
+        self.assertEqual(log_update.action, AuditAction.UPDATE)
+        self.assertEqual(log_update.changes["stage"]["new"], "Démo / Offre")
+        self.assertEqual(deal.audit_logs.count(), 2)
+
+    def test_audit_log_admin_immutability(self):
+        from .admin import AuditLogAdmin
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+
+        site = AdminSite()
+        audit_admin = AuditLogAdmin(AuditLog, site)
+        rf = RequestFactory()
+        req = rf.get("/admin/core/auditlog/")
+        req.user = self.user
+
+        # L'audit log doit être strictement immuable (pas d'ajout manuel, ni modification, ni suppression)
+        self.assertFalse(audit_admin.has_add_permission(req))
+        self.assertFalse(audit_admin.has_change_permission(req))
+        self.assertFalse(audit_admin.has_delete_permission(req))
+
+    def test_rbac_portfolio_separation(self):
+        from .admin import ContactAdmin, DealAdmin
+        from .permissions import filter_queryset_for_role
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+
+        # Configuration de 2 commerciaux distincts dans la même organisation
+        self.user_profile.role = OrganizationRole.MEMBER
+        self.user_profile.save()
+
+        commercial2 = User.objects.create_user(
+            username="commercial2",
+            email="commercial2@example.com",
+            password="securepassword123",
+        )
+        UserProfile.objects.create(
+            user=commercial2,
+            organization=self.organization,
+            role=OrganizationRole.MEMBER,
+        )
+
+        # Fiche Contact et Deal assignées à commercial 1
+        contact_c1 = self.contact
+        contact_c1.owner = self.user
+        contact_c1.save()
+
+        deal_c1 = Deal.objects.create(
+            organization=self.organization,
+            title="Deal C1",
+            amount=Decimal("10000.00"),
+            contact=contact_c1,
+            owner=self.user,
+        )
+
+        # Fiche Contact et Deal assignées à commercial 2
+        contact_c2 = Contact.objects.create(
+            organization=self.organization,
+            first_name="Paul",
+            last_name="ClientC2",
+            owner=commercial2,
+        )
+        deal_c2 = Deal.objects.create(
+            organization=self.organization,
+            title="Deal C2",
+            amount=Decimal("20000.00"),
+            contact=contact_c2,
+            owner=commercial2,
+        )
+
+        # 1. Cloisonnement du portefeuille pour commercial 1
+        qs_contacts_c1 = filter_queryset_for_role(Contact.objects.all(), self.user, owner_field="owner")
+        self.assertIn(contact_c1, qs_contacts_c1)
+        self.assertNotIn(contact_c2, qs_contacts_c1)
+
+        qs_deals_c1 = filter_queryset_for_role(Deal.objects.all(), self.user, owner_field="owner")
+        self.assertIn(deal_c1, qs_deals_c1)
+        self.assertNotIn(deal_c2, qs_deals_c1)
+
+        # 2. Cloisonnement du portefeuille pour commercial 2
+        qs_contacts_c2 = filter_queryset_for_role(Contact.objects.all(), commercial2, owner_field="owner")
+        self.assertIn(contact_c2, qs_contacts_c2)
+        self.assertNotIn(contact_c1, qs_contacts_c2)
+
+        # 3. Contrôle des permissions de modification / suppression inter-commerciaux
+        site = AdminSite()
+        contact_admin = ContactAdmin(Contact, site)
+        rf = RequestFactory()
+
+        req_c1 = rf.post("/admin/core/contact/")
+        req_c1.user = self.user
+
+        # Commercial 1 peut modifier sa fiche, mais PAS celle de commercial 2
+        self.assertTrue(contact_admin.has_change_permission(req_c1, contact_c1))
+        self.assertFalse(contact_admin.has_change_permission(req_c1, contact_c2))
+        self.assertFalse(contact_admin.has_delete_permission(req_c1, contact_c2))
+
+    def test_rbac_admin_full_access(self):
+        from .permissions import filter_queryset_for_role, is_org_admin
+        from .admin import ContactAdmin
+        from django.contrib.admin.sites import AdminSite
+        from django.test import RequestFactory
+
+        admin_user = User.objects.create_user(
+            username="admin_tenant",
+            email="admin@example.com",
+            password="securepassword123",
+        )
+        UserProfile.objects.create(
+            user=admin_user,
+            organization=self.organization,
+            role=OrganizationRole.ADMIN,
+        )
+
+        self.assertTrue(is_org_admin(admin_user, self.organization))
+
+        # L'administrateur a une vue sur l'intégralité des fiches du tenant
+        all_contacts = filter_queryset_for_role(Contact.objects.all(), admin_user)
+        self.assertEqual(all_contacts.count(), Contact.objects.filter(organization=self.organization).count())
+
+        # L'administrateur a le droit de modifier n'importe quelle fiche de son organisation
+        site = AdminSite()
+        contact_admin = ContactAdmin(Contact, site)
+        rf = RequestFactory()
+        req_admin = rf.post("/admin/core/contact/")
+        req_admin.user = admin_user
+
+        self.assertTrue(contact_admin.has_change_permission(req_admin, self.contact))
+        self.assertTrue(contact_admin.has_delete_permission(req_admin, self.contact))
+
+    def test_command_palette_and_vibecoding_settings(self):
+        from django.conf import settings
+
+        # Vérification des fonctionnalités modernes / UX sans friction Unfold
+        unfold_conf = getattr(settings, "UNFOLD", {})
+        self.assertTrue(unfold_conf.get("COMMAND", {}).get("search_models"))
+        self.assertTrue(unfold_conf.get("COMMAND", {}).get("show_history"))
+        self.assertIsNotNone(unfold_conf.get("DASHBOARD_CALLBACK"))

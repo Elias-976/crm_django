@@ -13,7 +13,16 @@ from unfold.contrib.filters.admin import (
 )
 from unfold.decorators import action, display
 
+from .audit import log_audit_event
+from .permissions import (
+    filter_queryset_for_role,
+    is_org_admin,
+    is_org_commercial,
+    is_org_viewer,
+)
 from .models import (
+    AuditAction,
+    AuditLog,
     Company,
     Contact,
     Deal,
@@ -184,27 +193,164 @@ class DealSegmentFilter(admin.SimpleListFilter):
 
 
 class SoftDeleteAdminMixin:
-    """Mixin apportant les actions de corbeille et de restauration rapide."""
+    """Mixin apportant les actions de corbeille, restauration et journalisation d'audit."""
 
     actions = ["soft_delete_selected_action", "restore_selected_action"]
 
     @action(description="Mettre à la corbeille 🗑️", icon="delete")
     def soft_delete_selected_action(self, request, queryset):
         count = 0
+        ip = request.META.get("REMOTE_ADDR")
         for obj in queryset:
             if hasattr(obj, "soft_delete"):
                 obj.soft_delete()
+                log_audit_event(
+                    instance=obj,
+                    action=AuditAction.DELETE,
+                    user=request.user,
+                    changes={"deleted_at": str(timezone.now())},
+                    ip_address=ip,
+                )
                 count += 1
         messages.success(request, f"{count} élément(s) déplacé(s) dans la corbeille.")
 
     @action(description="Restaurer depuis la corbeille ♻️", icon="restore_from_trash")
     def restore_selected_action(self, request, queryset):
         count = 0
+        ip = request.META.get("REMOTE_ADDR")
         for obj in queryset:
             if hasattr(obj, "restore"):
                 obj.restore()
+                log_audit_event(
+                    instance=obj,
+                    action=AuditAction.RESTORE,
+                    user=request.user,
+                    changes={"restored_at": str(timezone.now())},
+                    ip_address=ip,
+                )
                 count += 1
         messages.success(request, f"{count} élément(s) restauré(s) avec succès.")
+
+
+class AdminOnlyMixin:
+    """Restreint l'accès aux seuls administrateurs (OWNER/ADMIN) et superutilisateurs."""
+
+    def has_module_permission(self, request):
+        return request.user.is_superuser or is_org_admin(request.user)
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_superuser or is_org_admin(request.user)
+
+    def has_change_permission(self, request, obj=None):
+        return request.user.is_superuser or is_org_admin(request.user)
+
+    def has_delete_permission(self, request, obj=None):
+        return request.user.is_superuser or is_org_admin(request.user)
+
+    def has_add_permission(self, request):
+        return request.user.is_superuser or is_org_admin(request.user)
+
+
+class RBACAdminMixin:
+    """Mixin appliquant le contrôle d'accès basé sur les rôles (RBAC) et l'audit trail automatique."""
+
+    owner_field = "owner"
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return filter_queryset_for_role(qs, request.user, owner_field=self.owner_field)
+
+    def has_view_permission(self, request, obj=None):
+        if not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser:
+            return True
+        if hasattr(request.user, "profile") and request.user.profile.organization:
+            if obj is None:
+                return True
+            if is_org_admin(request.user) or is_org_viewer(request.user):
+                return obj.organization_id == request.user.profile.organization_id
+            owner_val = getattr(obj, self.owner_field, None)
+            return owner_val == request.user and obj.organization_id == request.user.profile.organization_id
+        return super().has_view_permission(request, obj)
+
+    def has_add_permission(self, request):
+        if not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser:
+            return True
+        if is_org_viewer(request.user):
+            return False
+        if is_org_admin(request.user) or is_org_commercial(request.user):
+            return True
+        return super().has_add_permission(request)
+
+    def has_change_permission(self, request, obj=None):
+        if not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser:
+            return True
+        if is_org_viewer(request.user):
+            return False
+        if is_org_admin(request.user):
+            return True
+        if is_org_commercial(request.user):
+            if obj is None:
+                return True
+            owner_val = getattr(obj, self.owner_field, None)
+            return owner_val == request.user
+        return super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        if not request.user.is_authenticated:
+            return False
+        if request.user.is_superuser:
+            return True
+        if is_org_viewer(request.user):
+            return False
+        if is_org_admin(request.user):
+            return True
+        if is_org_commercial(request.user):
+            if obj is None:
+                return True
+            owner_val = getattr(obj, self.owner_field, None)
+            return owner_val == request.user
+        return super().has_delete_permission(request, obj)
+
+    def save_model(self, request, obj, form, change):
+        # 1. Affectation automatique de l'organisation
+        if not obj.organization_id and hasattr(request.user, "profile") and request.user.profile.organization:
+            obj.organization = request.user.profile.organization
+
+        # 2. Affectation automatique du responsable si non renseigné
+        if not getattr(obj, self.owner_field, None) and not request.user.is_superuser:
+            setattr(obj, self.owner_field, request.user)
+
+        # 3. Capture des modifications pour l'audit
+        diff = {}
+        action_type = AuditAction.UPDATE if change else AuditAction.CREATE
+        if change:
+            for field in form.changed_data:
+                old_val = form.initial.get(field)
+                new_val = form.cleaned_data.get(field)
+                diff[field] = {
+                    "old": str(old_val) if old_val is not None else "",
+                    "new": str(new_val) if new_val is not None else "",
+                }
+        else:
+            diff = {"info": "Création initiale de la fiche"}
+
+        super().save_model(request, obj, form, change)
+
+        # 4. Enregistrement de l'audit log
+        ip = request.META.get("REMOTE_ADDR")
+        log_audit_event(
+            instance=obj,
+            action=action_type,
+            user=request.user,
+            changes=diff,
+            ip_address=ip,
+        )
 
 
 # ------------------------------------------------------------------------------
@@ -226,12 +372,49 @@ class TaskInline(TabularInline):
     ordering = ("due_date",)
 
 
+class AuditLogInline(TabularInline):
+    model = AuditLog
+    extra = 0
+    can_delete = False
+    fields = ("created_at", "display_action", "user", "display_diff")
+    readonly_fields = ("created_at", "display_action", "user", "display_diff")
+    ordering = ("-created_at",)
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    @display(
+        description="Action",
+        ordering="action",
+        label={
+            AuditAction.CREATE: "success",
+            AuditAction.UPDATE: "info",
+            AuditAction.DELETE: "danger",
+            AuditAction.RESTORE: "warning",
+        },
+    )
+    def display_action(self, obj):
+        return obj.action, obj.get_action_display()
+
+    @display(description="Détail des modifications")
+    def display_diff(self, obj):
+        if not obj.changes:
+            return "-"
+        items = []
+        for k, v in obj.changes.items():
+            if isinstance(v, dict) and "old" in v and "new" in v:
+                items.append(f"{k}: '{v['old']}' ➔ '{v['new']}'")
+            else:
+                items.append(f"{k}: {v}")
+        return ", ".join(items[:3]) + ("..." if len(items) > 3 else "")
+
+
 # ------------------------------------------------------------------------------
 # 3. Administration des Tenants & Espaces de Travail
 # ------------------------------------------------------------------------------
 
 @admin.register(Organization)
-class OrganizationAdmin(SoftDeleteAdminMixin, ModelAdmin):
+class OrganizationAdmin(AdminOnlyMixin, SoftDeleteAdminMixin, ModelAdmin):
     list_display = ("name", "slug", "is_active", "created_at")
     search_fields = ("name", "slug")
     list_filter = ("is_active", TrashFilter, "created_at")
@@ -240,7 +423,7 @@ class OrganizationAdmin(SoftDeleteAdminMixin, ModelAdmin):
 
 
 @admin.register(UserProfile)
-class UserProfileAdmin(ModelAdmin):
+class UserProfileAdmin(AdminOnlyMixin, ModelAdmin):
     list_display = ("user", "organization", "role", "created_at")
     list_filter = (
         ("organization", RelatedDropdownFilter),
@@ -250,7 +433,7 @@ class UserProfileAdmin(ModelAdmin):
 
 
 @admin.register(OrganizationMembership)
-class OrganizationMembershipAdmin(SoftDeleteAdminMixin, ModelAdmin):
+class OrganizationMembershipAdmin(AdminOnlyMixin, SoftDeleteAdminMixin, ModelAdmin):
     list_display = ("user", "organization", "role", "is_default", "created_at")
     list_filter = (
         ("organization", RelatedDropdownFilter),
@@ -267,7 +450,7 @@ class OrganizationMembershipAdmin(SoftDeleteAdminMixin, ModelAdmin):
 # ------------------------------------------------------------------------------
 
 @admin.register(Company)
-class CompanyAdmin(SoftDeleteAdminMixin, ModelAdmin):
+class CompanyAdmin(RBACAdminMixin, SoftDeleteAdminMixin, ModelAdmin):
     list_display = ("name", "organization", "domain", "phone", "city", "owner", "last_activity_at", "created_at")
     list_filter = (
         ("organization", RelatedDropdownFilter),
@@ -278,7 +461,7 @@ class CompanyAdmin(SoftDeleteAdminMixin, ModelAdmin):
     )
     search_fields = ("name", "domain", "city", "phone")
     readonly_fields = ("uuid", "created_at", "updated_at", "last_activity_at", "deleted_at")
-    inlines = [InteractionInline, TaskInline]
+    inlines = [InteractionInline, TaskInline, AuditLogInline]
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related("organization", "owner")
@@ -289,7 +472,7 @@ class CompanyAdmin(SoftDeleteAdminMixin, ModelAdmin):
 # ------------------------------------------------------------------------------
 
 @admin.register(Contact)
-class ContactAdmin(SoftDeleteAdminMixin, ModelAdmin):
+class ContactAdmin(RBACAdminMixin, SoftDeleteAdminMixin, ModelAdmin):
     list_display = (
         "full_name",
         "display_lead_score",
@@ -313,7 +496,7 @@ class ContactAdmin(SoftDeleteAdminMixin, ModelAdmin):
     )
     search_fields = ("first_name", "last_name", "email", "phone", "company__name")
     readonly_fields = ("uuid", "created_at", "updated_at", "last_activity_at", "deleted_at")
-    inlines = [InteractionInline, TaskInline]
+    inlines = [InteractionInline, TaskInline, AuditLogInline]
     actions = SoftDeleteAdminMixin.actions + ["batch_schedule_followup_action", "export_segment_csv_action"]
     actions_row = ["qualify_lead_action", "recalculate_score_action"]
 
@@ -471,7 +654,7 @@ class ContactAdmin(SoftDeleteAdminMixin, ModelAdmin):
 # ------------------------------------------------------------------------------
 
 @admin.register(Deal)
-class DealAdmin(SoftDeleteAdminMixin, ModelAdmin):
+class DealAdmin(RBACAdminMixin, SoftDeleteAdminMixin, ModelAdmin):
     list_display = (
         "title",
         "display_amount",
@@ -495,7 +678,7 @@ class DealAdmin(SoftDeleteAdminMixin, ModelAdmin):
     )
     search_fields = ("title", "contact__last_name", "company__name")
     readonly_fields = ("uuid", "created_at", "updated_at", "closed_at", "last_activity_at", "deleted_at")
-    inlines = [InteractionInline, TaskInline]
+    inlines = [InteractionInline, TaskInline, AuditLogInline]
 
     actions = SoftDeleteAdminMixin.actions + ["export_pipeline_csv_action"]
     actions_list = ["kanban_view_action"]
@@ -745,7 +928,9 @@ class InteractionAdmin(SoftDeleteAdminMixin, ModelAdmin):
 # ------------------------------------------------------------------------------
 
 @admin.register(Task)
-class TaskAdmin(SoftDeleteAdminMixin, ModelAdmin):
+class TaskAdmin(RBACAdminMixin, SoftDeleteAdminMixin, ModelAdmin):
+    owner_field = "assigned_to"
+
     list_display = (
         "title",
         "display_due_status",
@@ -768,6 +953,7 @@ class TaskAdmin(SoftDeleteAdminMixin, ModelAdmin):
     )
     search_fields = ("title", "description", "contact__last_name", "company__name")
     readonly_fields = ("uuid", "created_at", "updated_at", "completed_at", "deleted_at")
+    inlines = [AuditLogInline]
     actions_row = ["complete_task_action", "postpone_one_day_action", "postpone_three_days_action"]
 
     fieldsets = (
@@ -856,7 +1042,7 @@ class TaskAdmin(SoftDeleteAdminMixin, ModelAdmin):
 # ------------------------------------------------------------------------------
 
 @admin.register(WorkflowRule)
-class WorkflowRuleAdmin(SoftDeleteAdminMixin, ModelAdmin):
+class WorkflowRuleAdmin(AdminOnlyMixin, SoftDeleteAdminMixin, ModelAdmin):
     list_display = (
         "name",
         "organization",
@@ -923,3 +1109,89 @@ class WorkflowRuleAdmin(SoftDeleteAdminMixin, ModelAdmin):
             state = "activée" if rule.is_active else "désactivée"
             messages.success(request, f"La règle '{rule.name}' a été {state}.")
         return redirect("admin:core_workflowrule_changelist")
+
+
+# ------------------------------------------------------------------------------
+# 10. Journal d'Audit et Traçabilité (Audit Logs)
+# ------------------------------------------------------------------------------
+
+@admin.register(AuditLog)
+class AuditLogAdmin(AdminOnlyMixin, ModelAdmin):
+    list_display = (
+        "created_at",
+        "display_action",
+        "model_name",
+        "object_repr",
+        "user",
+        "display_changes_summary",
+        "organization",
+        "ip_address",
+    )
+    list_filter = (
+        ("action", ChoicesDropdownFilter),
+        "model_name",
+        ("user", RelatedDropdownFilter),
+        ("organization", RelatedDropdownFilter),
+        "created_at",
+    )
+    search_fields = ("object_repr", "object_id", "user__username", "model_name")
+    readonly_fields = (
+        "uuid",
+        "created_at",
+        "updated_at",
+        "action",
+        "model_name",
+        "object_id",
+        "object_repr",
+        "user",
+        "company",
+        "contact",
+        "deal",
+        "task",
+        "changes",
+        "ip_address",
+        "organization",
+    )
+    ordering = ("-created_at",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request).select_related("user", "organization")
+        if request.user.is_superuser:
+            return qs
+        if hasattr(request.user, "profile") and request.user.profile.organization:
+            return qs.filter(organization=request.user.profile.organization)
+        return qs.none()
+
+    @display(
+        description="Action",
+        ordering="action",
+        label={
+            AuditAction.CREATE: "success",
+            AuditAction.UPDATE: "info",
+            AuditAction.DELETE: "danger",
+            AuditAction.RESTORE: "warning",
+        },
+    )
+    def display_action(self, obj):
+        return obj.action, obj.get_action_display()
+
+    @display(description="Détail des modifications")
+    def display_changes_summary(self, obj):
+        if not obj.changes:
+            return "-"
+        items = []
+        for k, v in obj.changes.items():
+            if isinstance(v, dict) and "old" in v and "new" in v:
+                items.append(f"{k}: '{v['old']}' ➔ '{v['new']}'")
+            else:
+                items.append(f"{k}: {v}")
+        return ", ".join(items[:3]) + ("..." if len(items) > 3 else "")

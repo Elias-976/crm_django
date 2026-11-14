@@ -1046,3 +1046,104 @@ class WorkflowRule(TenantModel):
 
     def __str__(self) -> str:
         return f"{self.name} ({self.get_trigger_event_display()})"
+
+
+# ------------------------------------------------------------------------------
+# 8. Journal d'Audit et Traçabilité des Données (Audit Logs)
+# ------------------------------------------------------------------------------
+
+class AuditAction(models.TextChoices):
+    CREATE = "CREATE", "Création"
+    UPDATE = "UPDATE", "Modification"
+    DELETE = "DELETE", "Mise à la corbeille"
+    RESTORE = "RESTORE", "Restauration"
+
+
+class AuditLog(TenantModel):
+    """Journal d'audit immuable consignant les modifications sensibles sur les entités du CRM."""
+
+    action = models.CharField(
+        max_length=15,
+        choices=AuditAction.choices,
+        db_index=True,
+        verbose_name="Action",
+    )
+    model_name = models.CharField(
+        max_length=100,
+        db_index=True,
+        verbose_name="Entité",
+    )
+    object_id = models.CharField(
+        max_length=255,
+        db_index=True,
+        verbose_name="ID / UUID Objet",
+    )
+    object_repr = models.CharField(
+        max_length=255,
+        verbose_name="Libellé de l'objet",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="audit_logs",
+        verbose_name="Auteur",
+    )
+    company = models.ForeignKey(
+        "Company",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="audit_logs",
+        verbose_name="Entreprise liée",
+    )
+    contact = models.ForeignKey(
+        "Contact",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="audit_logs",
+        verbose_name="Contact lié",
+    )
+    deal = models.ForeignKey(
+        "Deal",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="audit_logs",
+        verbose_name="Opportunité liée",
+    )
+    task = models.ForeignKey(
+        "Task",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="audit_logs",
+        verbose_name="Tâche liée",
+    )
+    changes = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="Détail des modifications (Avant / Après)",
+    )
+    ip_address = models.GenericIPAddressField(
+        null=True,
+        blank=True,
+        verbose_name="Adresse IP",
+    )
+
+    class Meta:
+        verbose_name = "Journal d'audit"
+        verbose_name_plural = "Journaux d'audit"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["organization", "-created_at"]),
+            models.Index(fields=["organization", "model_name", "object_id"]),
+            models.Index(fields=["organization", "action", "-created_at"]),
+            models.Index(fields=["organization", "user", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        author = self.user.username if self.user else "Système"
+        return f"[{self.get_action_display()}] {self.model_name} '{self.object_repr}' par {author}"

@@ -143,6 +143,10 @@ UNFOLD = {
     "SHOW_HISTORY": True,
     "SHOW_VIEW_ON_SITE": False,
     "DASHBOARD_CALLBACK": "core.reporting.unfold_dashboard_callback",
+    "COMMAND": {
+        "search_models": True,
+        "show_history": True,
+    },
     "SIDEBAR": {
         "show_search": True,
         "show_all_applications": False,
@@ -222,6 +226,11 @@ UNFOLD = {
                         "title": "Membres d'Organisation",
                         "icon": "group_add",
                         "link": reverse_lazy("admin:core_organizationmembership_changelist"),
+                    },
+                    {
+                        "title": "Journal d'Audit",
+                        "icon": "history",
+                        "link": reverse_lazy("admin:core_auditlog_changelist"),
                     },
                     {
                         "title": "Profils Utilisateurs",
